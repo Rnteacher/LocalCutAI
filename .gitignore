@@ -1,0 +1,81 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+dist-node/
+build/
+*.tsbuildinfo
+
+# TS compiled output in source dirs
+apps/web/vite.config.js
+apps/web/vite.config.js.map
+apps/web/vite.config.d.ts
+apps/web/vite.config.d.ts.map
+apps/server/dist/
+packages/core/dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE & tools
+.vscode/
+.idea/
+.claude/settings.local.json
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Turbo
+.turbo/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# AI models (too large for git)
+apps/ai-server/src/models/*.pt
+apps/ai-server/src/models/*.pth
+apps/ai-server/src/models/*.safetensors
+apps/ai-server/src/models/*.bin
+apps/ai-server/src/models/*.onnx
+
+# Media and project files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.aac
+!apps/web/public/**
+
+# SQLite databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+npm-debug.log*
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Proxy and cache files
+.localcut-cache/

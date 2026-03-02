@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+:root {
+  --color-panel-bg: #1a1a2e;
+  --color-panel-border: #2d2d44;
+  --color-timeline-bg: #0f0f1a;
+  --color-clip-video: #3b82f6;
+  --color-clip-audio: #22c55e;
+  --color-clip-image: #f59e0b;
+  --color-playhead: #ef4444;
+  --color-selection: rgba(59, 130, 246, 0.3);
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-timeline-bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-panel-border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}

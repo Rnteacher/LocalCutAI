@@ -1,0 +1,31 @@
+{
+  "name": "localcut",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source, local-first video editor with AI capabilities",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "format": "prettier --write .",
+    "clean": "turbo clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@localcut/eslint-config": "workspace:*",
+    "@localcut/typescript-config": "workspace:*",
+    "prettier": "^3.5.3",
+    "turbo": "^2.4.4"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  }
+}
