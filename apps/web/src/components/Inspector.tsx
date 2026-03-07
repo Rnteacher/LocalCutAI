@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSelectionStore } from '../stores/selectionStore.js';
-import { useProjectStore } from '../stores/projectStore.js';
+import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
 import type {
   TimelineClipData,
   TimelineTrackData,
@@ -471,6 +471,33 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     const tracks = data?.tracks ?? [];
     return tracks.find((t) => t.clips.some((c) => c.id === selectedClip.id)) ?? null;
   })();
+
+  const transitionLimitBySide = useMemo(() => {
+    if (!selectedClip || !selectedClipTrack) {
+      return { in: null, out: null } as const;
+    }
+    const defaultDuration = Math.max(1, Math.round(fps * 0.5));
+    return {
+      in: computeTransitionSideLimit({
+        track: selectedClipTrack,
+        clip: selectedClip,
+        side: 'in',
+        type: (selectedClip.transitionIn?.type ?? 'cross-dissolve') as 'cross-dissolve' | 'fade-black',
+        requestedDurationFrames: selectedClip.transitionIn?.durationFrames ?? defaultDuration,
+        mediaAssets,
+        fps,
+      }),
+      out: computeTransitionSideLimit({
+        track: selectedClipTrack,
+        clip: selectedClip,
+        side: 'out',
+        type: (selectedClip.transitionOut?.type ?? 'cross-dissolve') as 'cross-dissolve' | 'fade-black',
+        requestedDurationFrames: selectedClip.transitionOut?.durationFrames ?? defaultDuration,
+        mediaAssets,
+        fps,
+      }),
+    } as const;
+  }, [selectedClip, selectedClipTrack, mediaAssets, fps]);
 
   const clipAsset = selectedClip?.mediaAssetId
     ? (mediaAssets.find((a) => a.id === selectedClip.mediaAssetId) ?? null)
@@ -1290,6 +1317,12 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               <div className="space-y-3">
                 {(['in', 'out'] as const).map((side) => {
                   const transition = side === 'in' ? selectedClip.transitionIn : selectedClip.transitionOut;
+                  const limit = side === 'in' ? transitionLimitBySide.in : transitionLimitBySide.out;
+                  const maxByLimit = Math.max(
+                    1,
+                    limit?.maxDurationFrames ?? Math.max(1, selectedClip.durationFrames),
+                  );
+                  const overLimit = transition ? transition.durationFrames > maxByLimit : false;
                   return (
                     <div key={side} className="rounded border border-zinc-700 bg-zinc-900/40 p-2">
                       <div className="mb-2 flex items-center justify-between text-[11px]">
@@ -1315,11 +1348,24 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                             label="Duration (frames)"
                             value={transition.durationFrames}
                             min={1}
-                            max={Math.max(1, selectedClip.durationFrames)}
+                            max={maxByLimit}
                             step={1}
                             onChange={(v) => updateTransitionDuration(side, v)}
                             format={(v) => `${Math.round(v)}f`}
                           />
+                          <div className="mt-1 text-[10px] text-zinc-500">
+                            Max by handles: {maxByLimit}f
+                            {transition.type === 'cross-dissolve'
+                              ? limit?.centeredOnCut
+                                ? ' (centered on cut)'
+                                : ' (no adjacent cut clip)'
+                              : ''}
+                          </div>
+                          {overLimit && (
+                            <div className="mt-1 text-[10px] text-amber-300">
+                              Will be clamped to {maxByLimit}f on apply.
+                            </div>
+                          )}
                           {transition.type === 'cross-dissolve' && (
                             <label className="mt-2 flex items-center gap-2 text-[11px] text-zinc-400">
                               <input

@@ -195,6 +195,79 @@ describe('ExportService core-plan integration', () => {
     expect(segments.videoSegments[0].positionY).toBe(10);
   });
 
+  it('keeps animated mask segments split across frames', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-mask-split',
+      projectId: 'proj1',
+      name: 'Sequence mask split',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 12,
+              masks: [
+                {
+                  id: 'm1',
+                  mode: 'add',
+                  closed: true,
+                  invert: false,
+                  opacity: 1,
+                  feather: 0,
+                  expansion: 0,
+                  keyframes: [
+                    {
+                      id: 'mkf1',
+                      frame: 0,
+                      points: [
+                        { x: 0.2, y: 0.2 },
+                        { x: 0.8, y: 0.2 },
+                        { x: 0.8, y: 0.8 },
+                        { x: 0.2, y: 0.8 },
+                      ],
+                    },
+                    {
+                      id: 'mkf2',
+                      frame: 11,
+                      points: [
+                        { x: 0.25, y: 0.2 },
+                        { x: 0.85, y: 0.2 },
+                        { x: 0.85, y: 0.8 },
+                        { x: 0.25, y: 0.8 },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const segments = mod.__test__.extractSegments(sequence);
+    expect(segments.videoSegments.length).toBeGreaterThan(1);
+    expect(segments.videoSegments.some((s: any) => s.clipLocalStartFrame > 0)).toBe(true);
+  });
+
   it('builds ffmpeg args with transform filters', async () => {
     const mod = await import('./exportService.js');
     const seqRow = {
@@ -521,6 +594,387 @@ describe('ExportService new timeline model support', () => {
 
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('color=c=0xff0000');
+  });
+
+  it('builds ffmpeg args for silhouette-alpha blend mode', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-sil-alpha',
+      projectId: 'proj1',
+      name: 'Sequence silhouette alpha',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              blendMode: 'silhouette-alpha',
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map([['m1', 'media.mp4']]),
+      1,
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('alphaextract');
+    expect(filterArg).toContain('alphamerge');
+  });
+
+  it('builds ffmpeg args for silhouette-luma blend mode with gamma', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-sil-luma',
+      projectId: 'proj1',
+      name: 'Sequence silhouette luma',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              blendMode: 'silhouette-luma',
+              blendParams: { silhouetteGamma: 1.75 },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map([['m1', 'media.mp4']]),
+      1,
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain("format=gray,lut=y='pow(val/255");
+    expect(filterArg).toContain('alphamerge');
+  });
+
+  it('builds ffmpeg args for adjustment-layer generator segments', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-adjustment',
+      projectId: 'proj1',
+      name: 'Sequence adjustment',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v2',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'adj1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              generator: { kind: 'adjustment-layer' },
+              brightness: 1.2,
+              contrast: 1.1,
+            },
+          ],
+        },
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map([['m1', 'media.mp4']]),
+      1,
+      mod.__test__.buildStoredExportMeta(seqData as any),
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('split[adjsrc');
+    expect(filterArg).toContain("overlay=x='");
+  });
+
+  it('builds ffmpeg args when manual masks are present on exported clips', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-masks',
+      projectId: 'proj1',
+      name: 'Sequence masks',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              masks: [
+                {
+                  id: 'm1',
+                  mode: 'add',
+                  closed: true,
+                  invert: false,
+                  opacity: 1,
+                  feather: 0,
+                  expansion: 0,
+                  keyframes: [
+                    {
+                      id: 'mkf1',
+                      frame: 0,
+                      points: [
+                        { x: 0.2, y: 0.2 },
+                        { x: 0.8, y: 0.2 },
+                        { x: 0.8, y: 0.8 },
+                        { x: 0.2, y: 0.8 },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map([['m1', 'media.mp4']]),
+      1,
+    );
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('geq=lum=');
+    expect(filterArg).toContain('alphaextract');
+    expect(filterArg).toContain('alphamerge');
+  });
+
+  it('adds black overlay video segments for fade-black transitions', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-fade-black',
+      projectId: 'proj1',
+      name: 'Sequence fade black',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionOut: {
+                id: 'fo1',
+                type: 'fade-black',
+                durationFrames: 12,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const segments = mod.__test__.extractSegments(sequence);
+    const fadeBlackSegments = segments.videoSegments.filter(
+      (seg: any) =>
+        seg.clipId === 'c1' &&
+        seg.mediaAssetId == null &&
+        seg.generator?.kind === 'black-video' &&
+        seg.opacity > 0,
+    );
+
+    expect(fadeBlackSegments.length).toBeGreaterThan(0);
+  });
+
+  it('extracts centered dissolve audio segments with equal-power gains around cut', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-centered-audio',
+      projectId: 'proj1',
+      name: 'Sequence centered audio',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'out',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionOut: {
+                id: 'tout',
+                type: 'cross-dissolve',
+                durationFrames: 12,
+                audioCrossfade: true,
+              },
+            },
+            {
+              id: 'in',
+              mediaAssetId: 'm2',
+              type: 'video',
+              startFrame: 24,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionIn: {
+                id: 'tin',
+                type: 'cross-dissolve',
+                durationFrames: 12,
+                audioCrossfade: true,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const segments = mod.__test__.extractSegments(sequence);
+
+    const midFrame = 24;
+    const outMid = segments.audioSegments.find(
+      (seg: any) => seg.clipId === 'out' && seg.startFrame <= midFrame && seg.endFrame > midFrame,
+    );
+    const inMid = segments.audioSegments.find(
+      (seg: any) => seg.clipId === 'in' && seg.startFrame <= midFrame && seg.endFrame > midFrame,
+    );
+
+    expect(outMid).toBeTruthy();
+    expect(inMid).toBeTruthy();
+    expect(outMid!.gain).toBeCloseTo(Math.cos(Math.PI / 4), 3);
+    expect(inMid!.gain).toBeCloseTo(Math.sin(Math.PI / 4), 3);
   });
 });
 describe('TimeValue to seconds conversion', () => {

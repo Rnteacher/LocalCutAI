@@ -7,7 +7,7 @@
  */
 
 import React, { useState, useRef, useCallback, useEffect } from 'react';
-import { useProjectStore } from '../stores/projectStore.js';
+import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
 import { usePlaybackStore } from '../stores/playbackStore.js';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import type { ApiMediaAsset } from '../lib/api.js';
@@ -97,14 +97,24 @@ interface TimelineClip {
     value: number;
   }>;
   blendMode?: string;
-  transitionIn?: { id: string; type: string; durationFrames: number } | null;
-  transitionOut?: { id: string; type: string; durationFrames: number } | null;
+  transitionIn?: {
+    id: string;
+    type: string;
+    durationFrames: number;
+    audioCrossfade?: boolean;
+  } | null;
+  transitionOut?: {
+    id: string;
+    type: string;
+    durationFrames: number;
+    audioCrossfade?: boolean;
+  } | null;
   generator?: { kind: 'black-video' | 'color-matte' | 'adjustment-layer'; color?: string } | null;
 }
 
 // Drag/Trim interaction state
 interface DragState {
-  mode: 'move' | 'trim-left' | 'trim-right';
+  mode: 'move' | 'trim-left' | 'trim-right' | 'transition-in' | 'transition-out';
   clipId: string;
   trackId: string;
   origStartFrame: number;
@@ -113,7 +123,15 @@ interface DragState {
   sourceOutFrame?: number;
   mediaAssetId?: string | null;
   copyOnDrag?: boolean;
+  transitionId?: string;
+  transitionType?: 'cross-dissolve' | 'fade-black';
+  transitionAudioCrossfade?: boolean;
+  origTransitionDurationFrames?: number;
   startX: number; // mouse X at drag start
+}
+
+function normalizeTransitionType(type: string | undefined): 'cross-dissolve' | 'fade-black' {
+  return type === 'fade-black' ? 'fade-black' : 'cross-dissolve';
 }
 
 /** Extract fps from first sequence metadata, default 30. */
@@ -173,6 +191,7 @@ export function Timeline() {
   const moveClip = useProjectStore((s) => s.moveClip);
   const trimClip = useProjectStore((s) => s.trimClip);
   const rippleTrimClip = useProjectStore((s) => s.rippleTrimClip);
+  const setClipTransition = useProjectStore((s) => s.setClipTransition);
   const splitClipAtPlayhead = useProjectStore((s) => s.splitClipAtPlayhead);
   const updateTrack = useProjectStore((s) => s.updateTrack);
   const isTrackLocked = useProjectStore((s) => s.isTrackLocked);
@@ -474,11 +493,17 @@ export function Timeline() {
       const dx = e.clientX - dragRef.current.startX;
       setDragDelta(dx);
 
-      // Show ripple state from mode toggle
-      setIsRipple(rippleMode);
+      const drag = dragRef.current;
+      const supportsRipple =
+        drag.mode === 'move' || drag.mode === 'trim-left' || drag.mode === 'trim-right';
+      setIsRipple(supportsRipple && rippleMode);
+
+      if (drag.mode === 'transition-in' || drag.mode === 'transition-out') {
+        setSnapLineFrame(null);
+        return;
+      }
 
       // --- Snap computation ---
-      const drag = dragRef.current;
       const rawDeltaFrames = dx / pxPerFrame;
 
       let edgeFrame: number; // the frame that should snap
@@ -593,6 +618,21 @@ export function Timeline() {
         } else {
           trimClip(drag.clipId, drag.origStartFrame, newDuration, { unlink: unlinkByModifier });
         }
+      } else if (drag.mode === 'transition-in' || drag.mode === 'transition-out') {
+        const side = drag.mode === 'transition-in' ? 'in' : 'out';
+        const baseDuration = Math.max(1, Math.round(drag.origTransitionDurationFrames ?? 1));
+        const requestedDuration = Math.max(
+          1,
+          baseDuration + (side === 'in' ? deltaFrames : -deltaFrames),
+        );
+        const type = drag.transitionType ?? 'cross-dissolve';
+        void setClipTransition(drag.clipId, side, {
+          id: drag.transitionId ?? `${drag.clipId}-${side}-transition`,
+          type,
+          durationFrames: requestedDuration,
+          audioCrossfade:
+            drag.transitionAudioCrossfade ?? (type === 'cross-dissolve'),
+        });
       }
     };
 
@@ -618,6 +658,7 @@ export function Timeline() {
     rippleMode,
     linkedSelection,
     isTrackLocked,
+    setClipTransition,
     clearClipSelection,
     selectClip,
   ]);
@@ -658,6 +699,40 @@ export function Timeline() {
       setDragDelta(0);
     },
     [selectClip, isTrackLocked, timelineTool, pxPerFrame, splitClipAtPlayhead, setActivePanel],
+  );
+
+  const handleTransitionHandleMouseDown = useCallback(
+    (
+      clip: TimelineClip,
+      trackId: string,
+      side: 'in' | 'out',
+      transition: NonNullable<TimelineClip['transitionIn']>,
+      e: React.MouseEvent,
+    ) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (isTrackLocked(trackId) || timelineTool === 'razor') return;
+
+      setActivePanel('timeline');
+      selectClip(clip.id, e.shiftKey || e.ctrlKey || e.metaKey);
+
+      dragRef.current = {
+        mode: side === 'in' ? 'transition-in' : 'transition-out',
+        clipId: clip.id,
+        trackId,
+        origStartFrame: clip.startFrame,
+        origDurationFrames: clip.durationFrames,
+        transitionId: transition.id,
+        transitionType: normalizeTransitionType(transition.type),
+        transitionAudioCrossfade: transition.audioCrossfade,
+        origTransitionDurationFrames: Math.max(1, Math.round(transition.durationFrames)),
+        startX: e.clientX,
+      };
+      setDragDelta(0);
+      setSnapLineFrame(null);
+      setIsRipple(false);
+    },
+    [isTrackLocked, timelineTool, setActivePanel, selectClip],
   );
 
   // --- Click handlers ---
@@ -1481,6 +1556,78 @@ export function Timeline() {
                   const isSelected = selectedClipIds.has(clip.id);
                   const isDragging = dragRef.current?.clipId === clip.id && dragDelta !== 0;
                   const style = getClipVisualStyle(clip);
+                  const drag = dragRef.current;
+                  const dragDeltaFrames = Math.round(dragDelta / pxPerFrame);
+                  const isTransitionInDragging =
+                    drag?.clipId === clip.id && drag.mode === 'transition-in';
+                  const isTransitionOutDragging =
+                    drag?.clipId === clip.id && drag.mode === 'transition-out';
+
+                  const transitionInDuration =
+                    clip.transitionIn == null
+                      ? null
+                      : Math.max(
+                          1,
+                          Math.round(
+                            isTransitionInDragging
+                              ? (drag.origTransitionDurationFrames ?? clip.transitionIn.durationFrames) +
+                                  dragDeltaFrames
+                              : clip.transitionIn.durationFrames,
+                          ),
+                        );
+                  const transitionOutDuration =
+                    clip.transitionOut == null
+                      ? null
+                      : Math.max(
+                          1,
+                          Math.round(
+                            isTransitionOutDragging
+                              ? (drag.origTransitionDurationFrames ?? clip.transitionOut.durationFrames) -
+                                  dragDeltaFrames
+                              : clip.transitionOut.durationFrames,
+                          ),
+                        );
+
+                  const transitionInLimit =
+                    clip.transitionIn && transitionInDuration != null
+                      ? computeTransitionSideLimit({
+                          track: track as any,
+                          clip: clip as any,
+                          side: 'in',
+                          type: normalizeTransitionType(clip.transitionIn.type),
+                          requestedDurationFrames: transitionInDuration,
+                          mediaAssets,
+                          fps,
+                        })
+                      : null;
+                  const transitionOutLimit =
+                    clip.transitionOut && transitionOutDuration != null
+                      ? computeTransitionSideLimit({
+                          track: track as any,
+                          clip: clip as any,
+                          side: 'out',
+                          type: normalizeTransitionType(clip.transitionOut.type),
+                          requestedDurationFrames: transitionOutDuration,
+                          mediaAssets,
+                          fps,
+                        })
+                      : null;
+
+                  const transitionInMax = transitionInLimit?.maxDurationFrames ?? Math.max(1, clip.durationFrames);
+                  const transitionOutMax = transitionOutLimit?.maxDurationFrames ?? Math.max(1, clip.durationFrames);
+                  const transitionInOverLimit =
+                    transitionInDuration != null && transitionInDuration > transitionInMax;
+                  const transitionOutOverLimit =
+                    transitionOutDuration != null && transitionOutDuration > transitionOutMax;
+
+                  const transitionInWidthPx =
+                    transitionInDuration == null
+                      ? 0
+                      : Math.max(6, Math.min(style.width * 0.35, transitionInDuration * pxPerFrame));
+                  const transitionOutWidthPx =
+                    transitionOutDuration == null
+                      ? 0
+                      : Math.max(6, Math.min(style.width * 0.35, transitionOutDuration * pxPerFrame));
                   const clipSpeed = clip.speed ?? 1;
                   const showSpeedBadge = Math.abs(clipSpeed - 1) > 0.001;
                   const speedBadge =
@@ -1565,7 +1712,7 @@ export function Timeline() {
                             height: 0,
                             borderTopWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
                             borderBottomWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
-                            borderRightWidth: `${Math.max(6, Math.min(style.width * 0.25, clip.transitionIn.durationFrames * pxPerFrame))}px`,
+                            borderRightWidth: `${transitionInWidthPx}px`,
                           }}
                         />
                       )}
@@ -1577,10 +1724,82 @@ export function Timeline() {
                             height: 0,
                             borderTopWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
                             borderBottomWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
-                            borderLeftWidth: `${Math.max(6, Math.min(style.width * 0.25, clip.transitionOut.durationFrames * pxPerFrame))}px`,
+                            borderLeftWidth: `${transitionOutWidthPx}px`,
                           }}
                         />
                       )}
+                      {clip.transitionIn && (
+                        <div
+                          className={`absolute top-1 bottom-1 w-1.5 rounded-sm ${
+                            timelineTool === 'razor'
+                              ? 'pointer-events-none opacity-20'
+                              : 'cursor-ew-resize bg-cyan-300/25 hover:bg-cyan-300/60'
+                          } ${isTransitionInDragging ? 'bg-cyan-200/80' : ''}`}
+                          style={{ left: Math.max(2, transitionInWidthPx - 2) }}
+                          title="Drag to adjust Transition In duration"
+                          onMouseDown={(e) => {
+                            if (!clip.transitionIn) return;
+                            handleTransitionHandleMouseDown(
+                              clip,
+                              track.id,
+                              'in',
+                              clip.transitionIn,
+                              e,
+                            );
+                          }}
+                        />
+                      )}
+                      {clip.transitionOut && (
+                        <div
+                          className={`absolute top-1 bottom-1 w-1.5 rounded-sm ${
+                            timelineTool === 'razor'
+                              ? 'pointer-events-none opacity-20'
+                              : 'cursor-ew-resize bg-cyan-300/25 hover:bg-cyan-300/60'
+                          } ${isTransitionOutDragging ? 'bg-cyan-200/80' : ''}`}
+                          style={{ right: Math.max(2, transitionOutWidthPx - 2) }}
+                          title="Drag to adjust Transition Out duration"
+                          onMouseDown={(e) => {
+                            if (!clip.transitionOut) return;
+                            handleTransitionHandleMouseDown(
+                              clip,
+                              track.id,
+                              'out',
+                              clip.transitionOut,
+                              e,
+                            );
+                          }}
+                        />
+                      )}
+                      {clip.transitionIn &&
+                        (isTransitionInDragging || transitionInOverLimit) &&
+                        transitionInDuration != null && (
+                          <div
+                            className={`pointer-events-none absolute left-1 top-5 z-20 rounded px-1 font-mono text-[9px] ${
+                              transitionInOverLimit
+                                ? 'bg-amber-400/90 text-black'
+                                : 'bg-zinc-900/80 text-cyan-200'
+                            }`}
+                          >
+                            {transitionInOverLimit
+                              ? `IN ${transitionInDuration}f -> ${transitionInMax}f`
+                              : `IN ${transitionInDuration}f`}
+                          </div>
+                        )}
+                      {clip.transitionOut &&
+                        (isTransitionOutDragging || transitionOutOverLimit) &&
+                        transitionOutDuration != null && (
+                          <div
+                            className={`pointer-events-none absolute right-1 top-5 z-20 rounded px-1 font-mono text-[9px] ${
+                              transitionOutOverLimit
+                                ? 'bg-amber-400/90 text-black'
+                                : 'bg-zinc-900/80 text-cyan-200'
+                            }`}
+                          >
+                            {transitionOutOverLimit
+                              ? `OUT ${transitionOutDuration}f -> ${transitionOutMax}f`
+                              : `OUT ${transitionOutDuration}f`}
+                          </div>
+                        )}
                       {/* Left trim handle */}
                       <div
                         className={`absolute left-0 top-0 bottom-0 w-1.5 hover:bg-white/30 active:bg-white/40 ${timelineTool === 'razor' ? 'pointer-events-none opacity-20' : 'cursor-col-resize'}`}

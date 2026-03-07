@@ -397,6 +397,144 @@ function normalizeTransition(raw: unknown): TransitionData | null {
   };
 }
 
+function sortTrackClipsByStart(clips: TimelineClipData[]): TimelineClipData[] {
+  return [...clips].sort((a, b) => {
+    if (a.startFrame !== b.startFrame) return a.startFrame - b.startFrame;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function findAdjacentClipAtCut(
+  track: TimelineTrackData | null,
+  clip: TimelineClipData | null,
+  side: 'in' | 'out',
+): TimelineClipData | null {
+  if (!track || !clip) return null;
+  const sorted = sortTrackClipsByStart(track.clips);
+  const idx = sorted.findIndex((c) => c.id === clip.id);
+  if (idx < 0) return null;
+  if (side === 'in') {
+    const prev = sorted[idx - 1];
+    if (!prev) return null;
+    return prev.startFrame + prev.durationFrames === clip.startFrame ? prev : null;
+  }
+  const next = sorted[idx + 1];
+  if (!next) return null;
+  return clip.startFrame + clip.durationFrames === next.startFrame ? next : null;
+}
+
+function estimateMediaTotalFrames(asset: ApiMediaAsset | undefined, fallbackFps: number): number | null {
+  if (!asset || typeof asset.duration !== 'number' || asset.duration <= 0) return null;
+  const fps =
+    asset.frameRate && asset.frameRate.num > 0 && asset.frameRate.den > 0
+      ? asset.frameRate.num / asset.frameRate.den
+      : fallbackFps;
+  if (!Number.isFinite(fps) || fps <= 0) return null;
+  return Math.max(1, Math.round(asset.duration * fps));
+}
+
+function computeClipSourceHandles(
+  clip: TimelineClipData,
+  mediaById: Map<string, ApiMediaAsset>,
+  fallbackFps: number,
+): { head: number; tail: number } {
+  const sourceIn = Math.max(0, Math.round(clip.sourceInFrame ?? 0));
+  const inferredOut = sourceIn + Math.max(1, Math.round(clip.durationFrames));
+  const sourceOut = Math.max(sourceIn + 1, Math.round(clip.sourceOutFrame ?? inferredOut));
+
+  if (!clip.mediaAssetId) {
+    return { head: 100000, tail: 100000 };
+  }
+
+  const media = mediaById.get(clip.mediaAssetId);
+  const estimatedTotal = estimateMediaTotalFrames(media, fallbackFps);
+  const totalFrames =
+    estimatedTotal != null ? Math.max(estimatedTotal, sourceOut) : sourceOut + Math.max(0, clip.durationFrames);
+
+  return {
+    head: sourceIn,
+    tail: Math.max(0, totalFrames - sourceOut),
+  };
+}
+
+export interface TransitionSideLimit {
+  maxDurationFrames: number;
+  clampedDurationFrames: number;
+  neighborClipId: string | null;
+  neighborSide: 'in' | 'out' | null;
+  centeredOnCut: boolean;
+}
+
+export function computeTransitionSideLimit(options: {
+  track: TimelineTrackData | null;
+  clip: TimelineClipData | null;
+  side: 'in' | 'out';
+  type: TimelineTransitionType;
+  requestedDurationFrames: number;
+  mediaAssets: ApiMediaAsset[];
+  fps: number;
+}): TransitionSideLimit {
+  const requested = Math.max(1, Math.round(options.requestedDurationFrames));
+  const clip = options.clip;
+  if (!clip) {
+    return {
+      maxDurationFrames: requested,
+      clampedDurationFrames: requested,
+      neighborClipId: null,
+      neighborSide: null,
+      centeredOnCut: false,
+    };
+  }
+
+  const baseMax = Math.max(1, Math.round(clip.durationFrames));
+  if (options.type !== 'cross-dissolve') {
+    return {
+      maxDurationFrames: baseMax,
+      clampedDurationFrames: Math.min(requested, baseMax),
+      neighborClipId: null,
+      neighborSide: null,
+      centeredOnCut: false,
+    };
+  }
+
+  const neighbor = findAdjacentClipAtCut(options.track, clip, options.side);
+  if (!neighbor) {
+    return {
+      maxDurationFrames: baseMax,
+      clampedDurationFrames: Math.min(requested, baseMax),
+      neighborClipId: null,
+      neighborSide: null,
+      centeredOnCut: false,
+    };
+  }
+
+  const mediaById = new Map(options.mediaAssets.map((a) => [a.id, a]));
+  const clipHandles = computeClipSourceHandles(clip, mediaById, options.fps);
+  const neighborHandles = computeClipSourceHandles(neighbor, mediaById, options.fps);
+  const clipHalfHandle = options.side === 'in' ? clipHandles.head : clipHandles.tail;
+  const neighborHalfHandle = options.side === 'in' ? neighborHandles.tail : neighborHandles.head;
+  const maxHalf = Math.floor(
+    Math.max(
+      0,
+      Math.min(
+        clipHalfHandle,
+        neighborHalfHandle,
+        Math.max(1, Math.round(clip.durationFrames)),
+        Math.max(1, Math.round(neighbor.durationFrames)),
+      ),
+    ),
+  );
+  const maxDurationFrames = Math.max(1, maxHalf * 2);
+
+  return {
+    maxDurationFrames,
+    clampedDurationFrames: Math.min(requested, maxDurationFrames),
+    neighborClipId: neighbor.id,
+    neighborSide: options.side === 'in' ? 'out' : 'in',
+    centeredOnCut: true,
+  };
+}
+
 function normalizeKeyframes(raw: unknown): TimelineKeyframeData[] {
   if (!Array.isArray(raw)) return [];
   const normalized: TimelineKeyframeData[] = [];
@@ -2008,6 +2146,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     get()._pushHistory();
     const data = getSeqData(seq);
+    const fpsValue =
+      (seq.frameRate?.num && seq.frameRate?.den ? seq.frameRate.num / seq.frameRate.den : 24) || 24;
+    const mediaAssets = get().mediaAssets;
+
+    const targetTrack = data.tracks.find((t) => t.clips.some((c) => c.id === clipId)) ?? null;
+    const targetClip = targetTrack?.clips.find((c) => c.id === clipId) ?? null;
+    if (!targetTrack || !targetClip) return;
+    const existing = side === 'in' ? targetClip.transitionIn : targetClip.transitionOut;
 
     const normalized = transition
       ? {
@@ -2020,13 +2166,99 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         }
       : null;
 
+    const limit = normalized
+      ? computeTransitionSideLimit({
+          track: targetTrack,
+          clip: targetClip,
+          side,
+          type: normalized.type,
+          requestedDurationFrames: normalized.durationFrames,
+          mediaAssets,
+          fps: fpsValue,
+        })
+      : null;
+
+    const clamped = normalized
+      ? {
+          ...normalized,
+          durationFrames: limit?.clampedDurationFrames ?? normalized.durationFrames,
+        }
+      : null;
+
+    const linkedApply =
+      clamped?.type === 'cross-dissolve' && limit?.neighborClipId && limit.neighborSide
+        ? {
+            clipId: limit.neighborClipId,
+            side: limit.neighborSide,
+          }
+        : null;
+
+    const linkedClear =
+      !clamped &&
+      existing?.type === 'cross-dissolve' &&
+      (() => {
+        const prevLimit = computeTransitionSideLimit({
+          track: targetTrack,
+          clip: targetClip,
+          side,
+          type: 'cross-dissolve',
+          requestedDurationFrames: existing.durationFrames,
+          mediaAssets,
+          fps: fpsValue,
+        });
+        if (!prevLimit.neighborClipId || !prevLimit.neighborSide) return null;
+        return {
+          clipId: prevLimit.neighborClipId,
+          side: prevLimit.neighborSide,
+        };
+      })();
+
+    const linkedCurrent =
+      linkedApply &&
+      data.tracks
+        .flatMap((t) => t.clips)
+        .find((c) => c.id === linkedApply.clipId);
+    const linkedTransition =
+      linkedApply && clamped
+        ? {
+            id:
+              (linkedApply.side === 'in'
+                ? linkedCurrent?.transitionIn?.id
+                : linkedCurrent?.transitionOut?.id) ?? generateId(),
+            type: 'cross-dissolve' as const,
+            durationFrames: clamped.durationFrames,
+            audioCrossfade: clamped.audioCrossfade ?? true,
+          }
+        : null;
+
     const updatedTracks = data.tracks.map((t) => ({
       ...t,
       clips: t.clips.map((c) => {
-        if (c.id !== clipId) return c;
-        return side === 'in'
-          ? { ...c, transitionIn: normalized }
-          : { ...c, transitionOut: normalized };
+        let next = c;
+        if (c.id === clipId) {
+          next =
+            side === 'in'
+              ? { ...next, transitionIn: clamped }
+              : { ...next, transitionOut: clamped };
+        }
+
+        if (linkedApply && linkedTransition && c.id === linkedApply.clipId) {
+          next =
+            linkedApply.side === 'in'
+              ? { ...next, transitionIn: linkedTransition }
+              : { ...next, transitionOut: linkedTransition };
+        } else if (linkedClear && c.id === linkedClear.clipId) {
+          const linkedExisting =
+            linkedClear.side === 'in' ? next.transitionIn : next.transitionOut;
+          if (linkedExisting?.type === 'cross-dissolve') {
+            next =
+              linkedClear.side === 'in'
+                ? { ...next, transitionIn: null }
+                : { ...next, transitionOut: null };
+          }
+        }
+
+        return next;
       }),
     }));
     const updatedData = { ...data, tracks: updatedTracks };

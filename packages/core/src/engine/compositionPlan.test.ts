@@ -200,6 +200,55 @@ describe('buildCompositionPlan', () => {
     expect(plan.videoLayers[0].transitionProgress).toBeNull();
   });
 
+  it('creates centered cross-dissolve overlap around a hard cut', () => {
+    const outgoing = makeClip({
+      id: 'OUT',
+      startTime: tv(0),
+      duration: tv(24),
+      sourceInPoint: tv(10),
+      sourceOutPoint: tv(34),
+      transitionOut: {
+        id: 'TOUT',
+        type: 'cross-dissolve',
+        duration: tv(12),
+        audioCrossfade: true,
+        params: {},
+      },
+    });
+    const incoming = makeClip({
+      id: 'IN',
+      startTime: tv(24),
+      duration: tv(24),
+      sourceInPoint: tv(20),
+      sourceOutPoint: tv(44),
+      transitionIn: {
+        id: 'TIN',
+        type: 'cross-dissolve',
+        duration: tv(12),
+        audioCrossfade: true,
+        params: {},
+      },
+    });
+    const seq = makeSequence([makeTrack('V1', [outgoing, incoming], 'video')]);
+
+    const plan = buildCompositionPlan(seq, tv(24));
+    expect(plan.videoLayers).toHaveLength(2);
+    expect(plan.audioSources).toHaveLength(2);
+
+    const outLayer = plan.videoLayers.find((l) => l.clipId === 'OUT');
+    const inLayer = plan.videoLayers.find((l) => l.clipId === 'IN');
+    expect(outLayer).toBeTruthy();
+    expect(inLayer).toBeTruthy();
+    expect(outLayer?.transitionType).toBe('cross-dissolve');
+    expect(inLayer?.transitionType).toBe('cross-dissolve');
+    expect(outLayer?.transitionPhase).toBe('out');
+    expect(inLayer?.transitionPhase).toBe('in');
+    expect(outLayer?.transitionProgress).toBeCloseTo(0.5);
+    expect(inLayer?.transitionProgress).toBeCloseTo(0.5);
+    expect(outLayer?.sourceTime.frames).toBeCloseTo(34);
+    expect(inLayer?.sourceTime.frames).toBeCloseTo(20);
+  });
+
   it('returns correct resolution and sequenceId', () => {
     const seq = makeSequence([]);
     const plan = buildCompositionPlan(seq, tv(0));

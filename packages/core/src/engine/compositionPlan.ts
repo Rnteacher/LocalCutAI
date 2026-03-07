@@ -1,70 +1,48 @@
 /**
  * @module compositionPlan
  *
- * Builds the per-frame rendering instructions from the current timeline state.
- *
- * A {@link CompositionPlan} describes everything the renderer needs to produce
- * a single output frame (or audio sample window): which media sources to
- * decode, how to composite video layers, and how to mix audio sources.
- *
- * The plan is intentionally a *data-only* description so that it can be
- * consumed by any renderer backend (Canvas 2D, WebGL, OffscreenCanvas, or a
- * server-side FFmpeg pipeline for export).
+ * Builds per-frame rendering instructions from timeline state.
  */
 
 import type { ID, Resolution, TimeValue } from '../types/project.js';
 import type {
   BlendMode,
+  ClipItem,
   Sequence,
+  Track,
   TransformState,
   TransitionType,
 } from '../types/timeline.js';
 import { resolveActiveClips } from './timeResolver.js';
 import { getPropertyValue } from './keyframeEval.js';
 import { computeClipGain, computeStereoPan, computeTrackGain, resolveAudibleTrackIds } from './audioMix.js';
-import { timeValueToSeconds, addTimeValues } from '../utils/timecode.js';
+import { timeValueToSeconds } from '../utils/timecode.js';
 
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
-/**
- * Describes a single video layer to be composited in bottom-to-top order.
- */
 export interface VideoLayer {
   clipId: ID;
   trackId: ID;
   mediaAssetId: ID | null;
-  /** Time in the source media file to decode. */
   sourceTime: TimeValue;
-  /** Fully resolved transform (after keyframe evaluation). */
   transform: TransformState;
-  /** Fully resolved opacity (after keyframe evaluation), clamped to [0, 1]. */
   opacity: number;
   blendMode: BlendMode;
   generator: ReturnType<typeof resolveActiveClips>[number]['clip']['generator'];
-  /**
-   * Progress through a transition in [0, 1], or `null` if no transition is
-   * active for this clip at this time.
-   */
   transitionProgress: number | null;
   transitionType: TransitionType | null;
   transitionPhase: 'in' | 'out' | null;
   transitionAudioCrossfade: boolean;
 }
 
-/**
- * Describes a single audio source contributing to the mix at this frame.
- */
 export interface AudioSource {
   clipId: ID;
   trackId: ID;
   mediaAssetId: ID | null;
-  /** Time in the source media file to read. */
   sourceTime: TimeValue;
-  /** Final computed gain (clip × envelope × track). */
   gain: number;
-  /** Stereo pan coefficients. */
   pan: { left: number; right: number };
   transitionProgress: number | null;
   transitionType: TransitionType | null;
@@ -72,16 +50,11 @@ export interface AudioSource {
   transitionAudioCrossfade: boolean;
 }
 
-/**
- * Complete rendering instructions for a single frame of the composition.
- */
 export interface CompositionPlan {
   sequenceId: ID;
   time: TimeValue;
   resolution: Resolution;
-  /** Video layers in bottom-to-top compositing order. */
   videoLayers: VideoLayer[];
-  /** Audio sources to be mixed together. */
   audioSources: AudioSource[];
 }
 
@@ -89,26 +62,35 @@ export interface CompositionPlan {
 // Transition helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Compute the transition progress for a clip at the given local time.
- *
- * - **transitionIn**: the first `transition.duration` frames of the clip.
- * - **transitionOut**: the last `transition.duration` frames of the clip.
- *
- * If neither transition is active at `localTime`, returns `null`.
- */
-function resolveTransition(
-  clip: ReturnType<typeof resolveActiveClips>[number]['clip'],
-  localTimeSec: number,
-): {
+interface TransitionSpec {
   progress: number;
   type: TransitionType;
   phase: 'in' | 'out';
   audioCrossfade: boolean;
-} | null {
+}
+
+interface CenteredDissolvePair {
+  track: Track;
+  outgoing: ClipItem;
+  incoming: ClipItem;
+  cutFrame: number;
+  progress: number;
+  audioCrossfade: boolean;
+}
+
+function normalizeTransitionType(type: string): TransitionType {
+  if (type === 'cross-dissolve' || type === 'fade-black') return type;
+  if (type === 'dissolve') return 'cross-dissolve';
+  if (type === 'wipe-left' || type === 'wipe-right') return 'cross-dissolve';
+  return 'cross-dissolve';
+}
+
+function resolveTransition(
+  clip: ClipItem,
+  localTimeSec: number,
+): TransitionSpec | null {
   const durationSec = timeValueToSeconds(clip.duration);
 
-  // Transition in.
   if (clip.transitionIn) {
     const tDur = timeValueToSeconds(clip.transitionIn.duration);
     if (localTimeSec < tDur && tDur > 0) {
@@ -121,7 +103,6 @@ function resolveTransition(
     }
   }
 
-  // Transition out.
   if (clip.transitionOut) {
     const tDur = timeValueToSeconds(clip.transitionOut.duration);
     const outStart = durationSec - tDur;
@@ -138,47 +119,103 @@ function resolveTransition(
   return null;
 }
 
-function normalizeTransitionType(type: string): TransitionType {
-  if (type === 'cross-dissolve' || type === 'fade-black') return type;
-  if (type === 'dissolve') return 'cross-dissolve';
-  if (type === 'wipe-left' || type === 'wipe-right') return 'cross-dissolve';
-  return 'cross-dissolve';
+function crossDissolveDurationFrames(transition: ClipItem['transitionIn'] | null): number {
+  if (!transition) return 0;
+  if (normalizeTransitionType(transition.type) !== 'cross-dissolve') return 0;
+  return Math.max(0, transition.duration.frames);
+}
+
+function resolveCenteredDissolvePairs(
+  sequence: Sequence,
+  playheadTime: TimeValue,
+): CenteredDissolvePair[] {
+  const playheadFrame = playheadTime.frames;
+  const pairs: CenteredDissolvePair[] = [];
+
+  for (const track of sequence.tracks) {
+    const clips = [...track.clips]
+      .filter((clip) => !clip.disabled)
+      .sort((a, b) => a.startTime.frames - b.startTime.frames);
+
+    for (let i = 0; i < clips.length - 1; i++) {
+      const outgoing = clips[i];
+      const incoming = clips[i + 1];
+      const cutFrame = outgoing.startTime.frames + outgoing.duration.frames;
+      if (cutFrame !== incoming.startTime.frames) continue;
+
+      const outDur = crossDissolveDurationFrames(outgoing.transitionOut);
+      const inDur = crossDissolveDurationFrames(incoming.transitionIn);
+      if (outDur <= 0 && inDur <= 0) continue;
+
+      const durationFrames = outDur > 0 && inDur > 0 ? Math.min(outDur, inDur) : Math.max(outDur, inDur);
+      if (durationFrames <= 0) continue;
+
+      const half = durationFrames / 2;
+      const windowStart = cutFrame - half;
+      const windowEnd = cutFrame + half;
+      if (playheadFrame < windowStart || playheadFrame >= windowEnd) continue;
+
+      const progress = (playheadFrame - windowStart) / durationFrames;
+      pairs.push({
+        track,
+        outgoing,
+        incoming,
+        cutFrame,
+        progress: Math.max(0, Math.min(1, progress)),
+        audioCrossfade:
+          outgoing.transitionOut?.audioCrossfade ??
+          incoming.transitionIn?.audioCrossfade ??
+          true,
+      });
+    }
+  }
+
+  return pairs;
 }
 
 // ---------------------------------------------------------------------------
 // Plan builder
 // ---------------------------------------------------------------------------
 
-/**
- * Build the complete composition plan for a single frame at the given
- * playhead time.
- *
- * @param sequence     - The sequence to evaluate.
- * @param playheadTime - The current playhead position.
- * @returns A {@link CompositionPlan} that the renderer can execute.
- */
 export function buildCompositionPlan(
   sequence: Sequence,
   playheadTime: TimeValue,
 ): CompositionPlan {
   const activeClips = resolveActiveClips(sequence, playheadTime);
   const audibleIds = resolveAudibleTrackIds(sequence.tracks);
+  const centeredPairs = resolveCenteredDissolvePairs(sequence, playheadTime);
 
   const videoLayers: VideoLayer[] = [];
   const audioSources: AudioSource[] = [];
+  const centeredClipIds = new Set<string>();
+  const centeredByTrack = new Map<string, CenteredDissolvePair[]>();
 
-  for (const ac of activeClips) {
-    const { clip, track, clipLocalTime, sourceTime } = ac;
+  for (const pair of centeredPairs) {
+    centeredClipIds.add(pair.outgoing.id);
+    centeredClipIds.add(pair.incoming.id);
+    const list = centeredByTrack.get(pair.track.id) ?? [];
+    list.push(pair);
+    centeredByTrack.set(pair.track.id, list);
+  }
+
+  const activeByTrack = new Map<string, typeof activeClips>();
+  for (const active of activeClips) {
+    const list = activeByTrack.get(active.track.id) ?? [];
+    list.push(active);
+    activeByTrack.set(active.track.id, list);
+  }
+
+  const appendClipContribution = (
+    clip: ClipItem,
+    track: Track,
+    clipLocalTime: TimeValue,
+    sourceTime: TimeValue,
+    transitionOverride?: TransitionSpec | null,
+  ): void => {
     const localTimeSec = timeValueToSeconds(clipLocalTime);
-    const transition = resolveTransition(clip, localTimeSec);
+    const transition = transitionOverride ?? resolveTransition(clip, localTimeSec);
 
-    // ----- Video / image layers -------------------------------------------
-    if (
-      (clip.type === 'video' || clip.type === 'image') &&
-      track.visible &&
-      !track.muted
-    ) {
-      // Evaluate all animatable transform properties.
+    if ((clip.type === 'video' || clip.type === 'image') && track.visible && !track.muted) {
       const transform: TransformState = {
         positionX: getPropertyValue(clip, 'transform.positionX', clipLocalTime),
         positionY: getPropertyValue(clip, 'transform.positionY', clipLocalTime),
@@ -189,10 +226,7 @@ export function buildCompositionPlan(
         anchorY: getPropertyValue(clip, 'transform.anchorY', clipLocalTime),
       };
 
-      const opacity = Math.max(
-        0,
-        Math.min(1, getPropertyValue(clip, 'opacity', clipLocalTime)),
-      );
+      const opacity = Math.max(0, Math.min(1, getPropertyValue(clip, 'opacity', clipLocalTime)));
 
       videoLayers.push({
         clipId: clip.id,
@@ -210,15 +244,10 @@ export function buildCompositionPlan(
       });
     }
 
-    // ----- Audio sources --------------------------------------------------
-    if (
-      (clip.type === 'video' || clip.type === 'audio') &&
-      audibleIds.has(track.id)
-    ) {
+    if ((clip.type === 'video' || clip.type === 'audio') && audibleIds.has(track.id)) {
       const clipGain = computeClipGain(clip, clipLocalTime);
       const trackGain = computeTrackGain(track);
       const gain = clipGain * trackGain;
-
       const kfPan = getPropertyValue(clip, 'pan', clipLocalTime);
       const pan = computeStereoPan(kfPan, track.pan);
 
@@ -235,11 +264,48 @@ export function buildCompositionPlan(
         transitionAudioCrossfade: transition?.audioCrossfade ?? false,
       });
     }
+  };
+
+  for (const track of sequence.tracks) {
+    const actives = activeByTrack.get(track.id) ?? [];
+    for (const active of actives) {
+      if (centeredClipIds.has(active.clip.id)) continue;
+      appendClipContribution(active.clip, active.track, active.clipLocalTime, active.sourceTime);
+    }
+
+    // We append incoming first so that after the final reverse(), outgoing
+    // is drawn first and incoming appears on top for source-over compositing.
+    for (const pair of centeredByTrack.get(track.id) ?? []) {
+      const incomingLocalFrames = playheadTime.frames - pair.cutFrame;
+      const outgoingLocalFrames = pair.outgoing.duration.frames + (playheadTime.frames - pair.cutFrame);
+
+      const incomingLocal: TimeValue = { frames: incomingLocalFrames, rate: playheadTime.rate };
+      const incomingSource: TimeValue = {
+        frames: Math.max(0, pair.incoming.sourceInPoint.frames + incomingLocalFrames),
+        rate: playheadTime.rate,
+      };
+      appendClipContribution(pair.incoming, pair.track, incomingLocal, incomingSource, {
+        progress: pair.progress,
+        type: 'cross-dissolve',
+        phase: 'in',
+        audioCrossfade: pair.audioCrossfade,
+      });
+
+      const outgoingLocal: TimeValue = { frames: outgoingLocalFrames, rate: playheadTime.rate };
+      const outgoingSource: TimeValue = {
+        frames: Math.max(0, pair.outgoing.sourceInPoint.frames + outgoingLocalFrames),
+        rate: playheadTime.rate,
+      };
+      appendClipContribution(pair.outgoing, pair.track, outgoingLocal, outgoingSource, {
+        progress: pair.progress,
+        type: 'cross-dissolve',
+        phase: 'out',
+        audioCrossfade: pair.audioCrossfade,
+      });
+    }
   }
 
-  // Video layers must be in bottom-to-top order.
-  // The sequence tracks are ordered top-to-bottom (V3, V2, V1, …), so the
-  // *last* video track in the array is the bottom layer.  We reverse to get
+  // Sequence tracks are top-to-bottom in the array, so reverse to get
   // bottom-to-top compositing order.
   videoLayers.reverse();
 

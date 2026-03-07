@@ -14,6 +14,7 @@ import { eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import {
   buildCompositionPlan,
+  getPropertyValue,
   timeValueToSeconds,
   type Sequence,
   type Track,
@@ -139,11 +140,38 @@ interface StoredClipData {
     duration?: { frames?: number };
     audioCrossfade?: boolean;
   } | null;
-  masks?: unknown[];
+  masks?: StoredMaskData[];
   generator?: {
     kind?: 'black-video' | 'color-matte' | 'adjustment-layer' | string;
     color?: string;
   } | null;
+}
+
+interface StoredMaskPoint {
+  x?: number;
+  y?: number;
+  inX?: number;
+  inY?: number;
+  outX?: number;
+  outY?: number;
+}
+
+interface StoredMaskShapeKeyframe {
+  id?: string;
+  frame?: number;
+  points?: StoredMaskPoint[];
+}
+
+interface StoredMaskData {
+  id?: string;
+  name?: string;
+  mode?: 'add' | 'subtract' | 'intersect' | string;
+  closed?: boolean;
+  invert?: boolean;
+  opacity?: number;
+  feather?: number;
+  expansion?: number;
+  keyframes?: StoredMaskShapeKeyframe[];
 }
 
 interface StoredExportMeta {
@@ -157,6 +185,16 @@ interface StoredExportMeta {
   >;
 }
 
+interface MediaDimensions {
+  width: number;
+  height: number;
+}
+
+interface ResolvedMediaInputs {
+  pathById: Map<string, string>;
+  dimensionsById: Map<string, MediaDimensions>;
+}
+
 interface VideoSegment {
   clipId: string;
   trackId: string;
@@ -166,8 +204,11 @@ interface VideoSegment {
   startFrame: number;
   endFrame: number;
   sourceStartFrame: number;
+  clipLocalStartFrame: number;
   opacity: number;
   blendMode: BlendMode;
+  silhouetteGamma: number;
+  masks: ClipItem['masks'];
   positionX: number;
   positionY: number;
   scaleX: number;
@@ -297,14 +338,15 @@ async function runExport(
     throw new Error('Sequence is empty - nothing to export');
   }
 
-  const mediaMap = await resolveMediaPaths(sequence);
+  const mediaInputs = await resolveMediaInputs(sequence);
   const ffmpegArgs = buildFFmpegArgs(
     sequence,
     params,
     outputPath,
-    mediaMap,
+    mediaInputs.pathById,
     totalDurationSec,
     storedMeta,
+    mediaInputs.dimensionsById,
   );
 
   await new Promise<void>((resolve, reject) => {
@@ -392,12 +434,19 @@ function buildFFmpegArgs(
   mediaMap: Map<string, string>,
   totalDurationSec: number,
   storedMeta?: StoredExportMeta,
+  mediaDimensionsById?: Map<string, MediaDimensions>,
 ): string[] {
   const width = params.width || sequence.resolution.width;
   const height = params.height || sequence.resolution.height;
   const fps = sequence.frameRate.num / sequence.frameRate.den;
 
   const { videoSegments, audioSegments } = extractSegments(sequence);
+  const clipById = new Map<string, ClipItem>();
+  for (const track of sequence.tracks) {
+    for (const clip of track.clips) {
+      clipById.set(clip.id, clip);
+    }
+  }
   const inputFiles: string[] = [];
   const inputMap = new Map<string, number>();
 
@@ -476,9 +525,16 @@ function buildFFmpegArgs(
     const clipMeta = storedMeta?.clipById.get(seg.clipId);
     const colorFilterChain = buildVideoColorFilterChain(clipMeta);
     const blendMode = seg.blendMode ?? 'normal';
+    const clipForMask = clipById.get(seg.clipId);
 
+    let composeBase = lastOverlay;
+    let adjustmentSourceLabel: string | null = null;
     if (seg.generator?.kind === 'adjustment-layer') {
-      throw new Error('Export for adjustment-layer is not supported yet in FFmpeg pipeline.');
+      const adjSrc = `adjsrc${i}`;
+      const adjBase = `adjbase${i}`;
+      filterParts.push(`[${lastOverlay}]split[${adjSrc}][${adjBase}]`);
+      composeBase = adjBase;
+      adjustmentSourceLabel = adjSrc;
     }
 
     if (seg.mediaAssetId) {
@@ -489,6 +545,15 @@ function buildFFmpegArgs(
           `scale='if(gt(a,${width}/${height}),${width},-2)':'if(gt(a,${width}/${height}),-2,${height})',` +
           `setsar=1,` +
           `${colorFilterChain}` +
+          `scale=iw*${scaleX.toFixed(6)}:ih*${scaleY.toFixed(6)},` +
+          `format=rgba,` +
+          `rotate=${rotationRad.toFixed(8)}:ow=rotw(iw):oh=roth(ih):c=none,` +
+          `colorchannelmixer=aa=${clamp01(seg.opacity)}[${vLabel}]`,
+      );
+    } else if (seg.generator?.kind === 'adjustment-layer') {
+      if (!adjustmentSourceLabel) continue;
+      filterParts.push(
+        `[${adjustmentSourceLabel}]${colorFilterChain}` +
           `scale=iw*${scaleX.toFixed(6)}:ih*${scaleY.toFixed(6)},` +
           `format=rgba,` +
           `rotate=${rotationRad.toFixed(8)}:ow=rotw(iw):oh=roth(ih):c=none,` +
@@ -512,31 +577,84 @@ function buildFFmpegArgs(
       continue;
     }
 
-    if (blendMode === 'silhouette-alpha' || blendMode === 'silhouette-luma') {
-      throw new Error(`Export blend mode '${blendMode}' is not supported yet in FFmpeg pipeline.`);
+    let segmentVisualLabel = vLabel;
+    if ((seg.masks?.length ?? 0) > 0 && clipForMask) {
+      const sourceDims =
+        seg.mediaAssetId && mediaDimensionsById?.has(seg.mediaAssetId)
+          ? mediaDimensionsById.get(seg.mediaAssetId)!
+          : {
+              width,
+              height,
+            };
+      const maskEval = buildSegmentMaskExpression(
+        clipForMask,
+        seg.clipLocalStartFrame,
+        sourceDims,
+        sequence.resolution,
+      );
+      if (maskEval.expression) {
+        const maskBaseLabel = `maskbase${i}`;
+        const maskLabel =
+          maskEval.blurSigma > 0.05 ? `maskblur${i}` : maskBaseLabel;
+        const alphaSrcLabel = `asrc${i}`;
+        const alphaMulLabel = `amul${i}`;
+        const rgbSrcLabel = `rgbsrc${i}`;
+        const maskedLabel = `vm${i}`;
+        filterParts.push(
+          `[${vLabel}]format=gray,geq=lum='255*${escapeFfmpegExpression(maskEval.expression)}'[${maskBaseLabel}]`,
+        );
+        if (maskEval.blurSigma > 0.05) {
+          filterParts.push(
+            `[${maskBaseLabel}]gblur=sigma=${Math.min(128, maskEval.blurSigma).toFixed(4)}[${maskLabel}]`,
+          );
+        }
+        filterParts.push(`[${vLabel}]alphaextract[${alphaSrcLabel}]`);
+        filterParts.push(`[${alphaSrcLabel}][${maskLabel}]blend=all_mode=multiply[${alphaMulLabel}]`);
+        filterParts.push(`[${vLabel}]format=rgba[${rgbSrcLabel}]`);
+        filterParts.push(`[${rgbSrcLabel}][${alphaMulLabel}]alphamerge[${maskedLabel}]`);
+        segmentVisualLabel = maskedLabel;
+      }
     }
 
     if (blendMode === 'normal') {
       filterParts.push(
-        `[${lastOverlay}][${vLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${ovLabel}]`,
+        `[${composeBase}][${segmentVisualLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${ovLabel}]`,
       );
     } else {
       const segBase = `segbase${i}`;
       const segPos = `segpos${i}`;
-      const ffBlendMode =
-        blendMode === 'add'
-          ? 'addition'
-          : blendMode === 'multiply'
-            ? 'multiply'
-            : blendMode === 'screen'
-              ? 'screen'
-              : 'overlay';
 
       filterParts.push(`color=c=black@0:s=${width}x${height}:r=${fps}:d=${totalDurationSec}[${segBase}]`);
       filterParts.push(
-        `[${segBase}][${vLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${segPos}]`,
+        `[${segBase}][${segmentVisualLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${segPos}]`,
       );
-      filterParts.push(`[${lastOverlay}][${segPos}]blend=all_mode=${ffBlendMode}[${ovLabel}]`);
+
+      if (blendMode === 'silhouette-alpha' || blendMode === 'silhouette-luma') {
+        const maskLabel = `mask${i}`;
+        const maskInvLabel = `maski${i}`;
+        const baseAlphaLabel = `basea${i}`;
+        if (blendMode === 'silhouette-alpha') {
+          filterParts.push(`[${segPos}]alphaextract[${maskLabel}]`);
+        } else {
+          const gamma = clampRange(seg.silhouetteGamma ?? 1, 0.1, 8);
+          filterParts.push(
+            `[${segPos}]format=gray,lut=y='pow(val/255\\,${gamma.toFixed(6)})*255'[${maskLabel}]`,
+          );
+        }
+        filterParts.push(`[${maskLabel}]negate[${maskInvLabel}]`);
+        filterParts.push(`[${composeBase}]format=rgba[${baseAlphaLabel}]`);
+        filterParts.push(`[${baseAlphaLabel}][${maskInvLabel}]alphamerge[${ovLabel}]`);
+      } else {
+        const ffBlendMode =
+          blendMode === 'add'
+            ? 'addition'
+            : blendMode === 'multiply'
+              ? 'multiply'
+              : blendMode === 'screen'
+                ? 'screen'
+                : 'overlay';
+        filterParts.push(`[${composeBase}][${segPos}]blend=all_mode=${ffBlendMode}[${ovLabel}]`);
+      }
     }
 
     lastOverlay = ovLabel;
@@ -604,6 +722,12 @@ function extractSegments(sequence: Sequence): {
 } {
   const videoSegments: VideoSegment[] = [];
   const audioSegments: AudioSegment[] = [];
+  const clipById = new Map<string, ClipItem>();
+  for (const track of sequence.tracks) {
+    for (const clip of track.clips) {
+      clipById.set(clip.id, clip);
+    }
+  }
 
   const videoTrackOrder = new Map<string, number>();
   sequence.tracks
@@ -649,6 +773,21 @@ function extractSegments(sequence: Sequence): {
           boundaries.add(start + Math.max(0, kf.time.frames));
         }
       }
+
+      for (const mask of clip.masks ?? []) {
+        const sortedMaskKfs = [...mask.keyframes].sort((a, b) => a.frame - b.frame);
+        if (sortedMaskKfs.length > 1) {
+          const mStart = Math.max(0, sortedMaskKfs[0].frame);
+          const mEnd = Math.min(clip.duration.frames, sortedMaskKfs[sortedMaskKfs.length - 1].frame);
+          for (let f = mStart; f <= mEnd; f++) {
+            boundaries.add(start + f);
+          }
+        } else {
+          for (const kf of sortedMaskKfs) {
+            boundaries.add(start + Math.max(0, kf.frame));
+          }
+        }
+      }
     }
   }
 
@@ -665,10 +804,37 @@ function extractSegments(sequence: Sequence): {
     const time: TimeValue = { frames: frameStart, rate: sequence.frameRate };
     const plan = buildCompositionPlan(sequence, time);
 
+    const mergeVideoSegment = (
+      key: string,
+      seg: VideoSegment,
+      sequentialSourceFrame: number | null,
+    ): void => {
+      const prev = lastVideoByKey.get(key);
+      const expectedSourceFrame = prev
+        ? prev.sourceStartFrame + (prev.endFrame - prev.startFrame)
+        : -1;
+      const isSequentialSource =
+        sequentialSourceFrame == null || expectedSourceFrame === sequentialSourceFrame;
+
+      if (prev && prev.endFrame === frameStart && isSequentialSource) {
+        prev.endFrame = frameEnd;
+        return;
+      }
+
+      videoSegments.push(seg);
+      lastVideoByKey.set(key, seg);
+    };
+
     for (const layer of plan.videoLayers) {
       if (!layer.mediaAssetId && !layer.generator) continue;
+      const clip = clipById.get(layer.clipId);
       const z = videoTrackOrder.get(layer.trackId) ?? 0;
       const transitionOpacity = resolveTransitionOpacityMultiplier(
+        layer.transitionType,
+        layer.transitionProgress,
+        layer.transitionPhase,
+      );
+      const fadeBlackOpacity = resolveFadeBlackOverlayOpacity(
         layer.transitionType,
         layer.transitionProgress,
         layer.transitionPhase,
@@ -680,53 +846,107 @@ function extractSegments(sequence: Sequence): {
       const scaleY = round4(layer.transform.scaleY);
       const rotation = round3(layer.transform.rotation);
       const blendMode = layer.blendMode;
-      const generatorKey = layer.generator
-        ? `${layer.generator.kind}:${layer.generator.color ?? ''}`
-        : 'none';
-      const key = [
-        layer.clipId,
-        layer.trackId,
-        layer.mediaAssetId ?? 'none',
-        generatorKey,
-        z,
-        opacity.toFixed(4),
-        blendMode,
-        positionX.toFixed(3),
-        positionY.toFixed(3),
-        scaleX.toFixed(4),
-        scaleY.toFixed(4),
-        rotation.toFixed(3),
-      ].join('|');
+      const silhouetteGamma = clampRange(clip?.blendParams?.silhouetteGamma ?? 1, 0.1, 8);
+      const clipLocalStartFrame = clip ? Math.max(0, frameStart - clip.startTime.frames) : 0;
+      const hasAnimatedMaskShape =
+        (clip?.masks ?? []).some((mask) => (mask.keyframes?.length ?? 0) > 1);
+      const hasAnimatedMaskParams =
+        (clip?.keyframes ?? []).filter(
+          (kf) =>
+            kf.property === 'mask.opacity' ||
+            kf.property === 'mask.feather' ||
+            kf.property === 'mask.expansion',
+        ).length > 1;
+      const maskMergeToken =
+        hasAnimatedMaskShape || hasAnimatedMaskParams ? `maskf:${clipLocalStartFrame}` : 'maskf:static';
 
-      const prev = lastVideoByKey.get(key);
-      const expectedSourceFrame = prev
-        ? prev.sourceStartFrame + (prev.endFrame - prev.startFrame)
-        : -1;
-      const isSequentialSource =
-        layer.mediaAssetId != null && expectedSourceFrame === layer.sourceTime.frames;
-
-      if (prev && prev.endFrame === frameStart && (layer.mediaAssetId == null || isSequentialSource)) {
-        prev.endFrame = frameEnd;
-      } else {
-        const seg: VideoSegment = {
-          clipId: layer.clipId,
-          trackId: layer.trackId,
-          mediaAssetId: layer.mediaAssetId,
-          generator: layer.generator ?? null,
+      if (opacity > 0.0001) {
+        const generatorKey = layer.generator
+          ? `${layer.generator.kind}:${layer.generator.color ?? ''}`
+          : 'none';
+        const key = [
+          layer.clipId,
+          layer.trackId,
+          layer.mediaAssetId ?? 'none',
+          generatorKey,
           z,
-          startFrame: frameStart,
-          endFrame: frameEnd,
-          sourceStartFrame: layer.mediaAssetId ? layer.sourceTime.frames : 0,
-          opacity,
+          opacity.toFixed(4),
           blendMode,
-          positionX,
-          positionY,
-          scaleX,
-          scaleY,
-          rotation,
-        };
-        videoSegments.push(seg);
-        lastVideoByKey.set(key, seg);
+          silhouetteGamma.toFixed(4),
+          maskMergeToken,
+          positionX.toFixed(3),
+          positionY.toFixed(3),
+          scaleX.toFixed(4),
+          scaleY.toFixed(4),
+          rotation.toFixed(3),
+        ].join('|');
+
+        mergeVideoSegment(
+          key,
+          {
+            clipId: layer.clipId,
+            trackId: layer.trackId,
+            mediaAssetId: layer.mediaAssetId,
+            generator: layer.generator ?? null,
+            z,
+            startFrame: frameStart,
+            endFrame: frameEnd,
+            sourceStartFrame: layer.mediaAssetId ? layer.sourceTime.frames : 0,
+            clipLocalStartFrame,
+            opacity,
+            blendMode,
+            silhouetteGamma,
+            masks: clip?.masks ?? [],
+            positionX,
+            positionY,
+            scaleX,
+            scaleY,
+            rotation,
+          },
+          layer.mediaAssetId ? layer.sourceTime.frames : null,
+        );
+      }
+
+      if (fadeBlackOpacity > 0.0001) {
+        const fadeOpacity = clamp01(layer.opacity * fadeBlackOpacity);
+        const fadeKey = [
+          layer.clipId,
+          layer.trackId,
+          'fade-black-overlay',
+          z.toFixed(4),
+          fadeOpacity.toFixed(4),
+          maskMergeToken,
+          positionX.toFixed(3),
+          positionY.toFixed(3),
+          scaleX.toFixed(4),
+          scaleY.toFixed(4),
+          rotation.toFixed(3),
+        ].join('|');
+
+        mergeVideoSegment(
+          fadeKey,
+          {
+            clipId: layer.clipId,
+            trackId: layer.trackId,
+            mediaAssetId: null,
+            generator: { kind: 'black-video' },
+            z: z + 0.0001,
+            startFrame: frameStart,
+            endFrame: frameEnd,
+            sourceStartFrame: 0,
+            clipLocalStartFrame,
+            opacity: fadeOpacity,
+            blendMode: 'normal',
+            silhouetteGamma: 1,
+            masks: clip?.masks ?? [],
+            positionX,
+            positionY,
+            scaleX,
+            scaleY,
+            rotation,
+          },
+          null,
+        );
       }
     }
 
@@ -778,6 +998,287 @@ function extractSegments(sequence: Sequence): {
   }
 
   return { videoSegments, audioSegments };
+}
+
+type CoreMaskPoint = ClipItem['masks'][number]['keyframes'][number]['points'][number];
+
+interface RasterMaskPoint {
+  x: number;
+  y: number;
+  inX: number;
+  inY: number;
+  outX: number;
+  outY: number;
+}
+
+function buildSegmentMaskExpression(
+  clip: ClipItem,
+  clipLocalFrame: number,
+  sourceDimensions: MediaDimensions,
+  outputResolution: { width: number; height: number },
+): { expression: string | null; blurSigma: number } {
+  const masks = clip.masks ?? [];
+  if (masks.length === 0) return { expression: null, blurSigma: 0 };
+
+  const localTime: TimeValue = {
+    frames: Math.max(0, Math.round(clipLocalFrame)),
+    rate: clip.startTime.rate,
+  };
+  const keyframedMaskOpacity = clamp01(getPropertyValue(clip, 'mask.opacity', localTime));
+  const keyframedMaskFeather = Math.max(0, getPropertyValue(clip, 'mask.feather', localTime));
+  const keyframedMaskExpansion = getPropertyValue(clip, 'mask.expansion', localTime);
+  const sourceScale =
+    (outputResolution.width / Math.max(1, sourceDimensions.width) +
+      outputResolution.height / Math.max(1, sourceDimensions.height)) /
+    2;
+  const sizeScale = Math.max(1, (outputResolution.width + outputResolution.height) / 2);
+
+  const addTerms: string[] = [];
+  const intersectTerms: string[] = [];
+  const subtractTerms: string[] = [];
+  let maxBlurSigma = 0;
+
+  for (const mask of masks) {
+    const resolvedPoints = resolveMaskShapeAtFrame(mask, clipLocalFrame);
+    if (resolvedPoints.length < 2) continue;
+
+    const opacity = clamp01((mask.opacity ?? 1) * keyframedMaskOpacity);
+    if (opacity <= 0.0001) continue;
+
+    const featherPx = Math.max(0, ((mask.feather ?? 0) + keyframedMaskFeather) * sourceScale);
+    const expansionPx = ((mask.expansion ?? 0) + keyframedMaskExpansion) * sourceScale;
+    const expansionNorm = expansionPx / sizeScale;
+
+    const closedPath = mask.closed !== false || resolvedPoints.length >= 3;
+    const normalizedPoints = mapMaskPointsToNormalized(
+      resolvedPoints,
+      sourceDimensions,
+      expansionNorm,
+    );
+    const polygon = flattenMaskPath(normalizedPoints, closedPath);
+    if (polygon.length < 3) continue;
+
+    const insideExpr = buildPointInPolygonExpression(polygon);
+    if (!insideExpr) continue;
+    const term = `(${insideExpr})*${opacity.toFixed(6)}`;
+
+    const effectiveMode = resolveEffectiveMaskMode(mask.mode, mask.invert === true);
+    if (effectiveMode === 'add') {
+      addTerms.push(term);
+    } else if (effectiveMode === 'intersect') {
+      intersectTerms.push(term);
+    } else {
+      subtractTerms.push(term);
+    }
+
+    maxBlurSigma = Math.max(maxBlurSigma, featherPx);
+  }
+
+  if (addTerms.length === 0 && intersectTerms.length === 0 && subtractTerms.length === 0) {
+    return { expression: null, blurSigma: 0 };
+  }
+
+  let acc = addTerms.length === 0 ? '1' : '0';
+  for (const term of addTerms) {
+    acc = `max(${acc},${term})`;
+  }
+  for (const term of intersectTerms) {
+    acc = `min(${acc},${term})`;
+  }
+  for (const term of subtractTerms) {
+    acc = `(${acc})*(1-(${term}))`;
+  }
+
+  return {
+    expression: `max(0,min(1,${acc}))`,
+    blurSigma: maxBlurSigma,
+  };
+}
+
+function resolveEffectiveMaskMode(
+  mode: ClipItem['masks'][number]['mode'],
+  invert: boolean,
+): 'add' | 'subtract' | 'intersect' {
+  if (!invert) return mode;
+  if (mode === 'add') return 'subtract';
+  if (mode === 'subtract') return 'add';
+  return 'intersect';
+}
+
+function resolveMaskShapeAtFrame(
+  mask: ClipItem['masks'][number],
+  clipLocalFrame: number,
+): CoreMaskPoint[] {
+  const keyframes = [...(mask.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
+  if (keyframes.length === 0) return [];
+  if (keyframes.length === 1) return keyframes[0].points.map((p) => ({ ...p }));
+
+  const first = keyframes[0];
+  const last = keyframes[keyframes.length - 1];
+  if (clipLocalFrame <= first.frame) return first.points.map((p) => ({ ...p }));
+  if (clipLocalFrame >= last.frame) return last.points.map((p) => ({ ...p }));
+
+  for (let i = 0; i < keyframes.length - 1; i++) {
+    const from = keyframes[i];
+    const to = keyframes[i + 1];
+    if (clipLocalFrame < from.frame || clipLocalFrame > to.frame) continue;
+
+    const t = (clipLocalFrame - from.frame) / Math.max(1, to.frame - from.frame);
+    if (from.points.length !== to.points.length) {
+      return (t < 0.5 ? from.points : to.points).map((p) => ({ ...p }));
+    }
+    return from.points.map((a, idx) => {
+      const b = to.points[idx];
+      return {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        inX: a.inX + (b.inX - a.inX) * t,
+        inY: a.inY + (b.inY - a.inY) * t,
+        outX: a.outX + (b.outX - a.outX) * t,
+        outY: a.outY + (b.outY - a.outY) * t,
+      };
+    });
+  }
+
+  return first.points.map((p) => ({ ...p }));
+}
+
+function mapMaskPointsToNormalized(
+  points: CoreMaskPoint[],
+  sourceDimensions: MediaDimensions,
+  expansionNorm: number,
+): RasterMaskPoint[] {
+  const srcW = Math.max(1, sourceDimensions.width);
+  const srcH = Math.max(1, sourceDimensions.height);
+  const normalized = points.every(
+    (p) =>
+      Math.abs(p.x) <= 1.5 &&
+      Math.abs(p.y) <= 1.5 &&
+      Math.abs(p.inX) <= 1.5 &&
+      Math.abs(p.inY) <= 1.5 &&
+      Math.abs(p.outX) <= 1.5 &&
+      Math.abs(p.outY) <= 1.5,
+  );
+  const mapX = (value: number) => (normalized ? value : value / srcW);
+  const mapY = (value: number) => (normalized ? value : value / srcH);
+
+  const mapped = points.map((p) => ({
+    x: mapX(p.x),
+    y: mapY(p.y),
+    inX: mapX(p.inX),
+    inY: mapY(p.inY),
+    outX: mapX(p.outX),
+    outY: mapY(p.outY),
+  }));
+  if (Math.abs(expansionNorm) <= 0.000001 || mapped.length === 0) {
+    return mapped;
+  }
+
+  const center = mapped.reduce(
+    (acc, p) => {
+      acc.x += p.x;
+      acc.y += p.y;
+      return acc;
+    },
+    { x: 0, y: 0 },
+  );
+  center.x /= mapped.length;
+  center.y /= mapped.length;
+
+  return mapped.map((p) => {
+    const dx = p.x - center.x;
+    const dy = p.y - center.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.000001) return { ...p };
+    const ox = (dx / len) * expansionNorm;
+    const oy = (dy / len) * expansionNorm;
+    return {
+      x: p.x + ox,
+      y: p.y + oy,
+      inX: p.inX + ox,
+      inY: p.inY + oy,
+      outX: p.outX + ox,
+      outY: p.outY + oy,
+    };
+  });
+}
+
+function flattenMaskPath(points: RasterMaskPoint[], closed: boolean): Array<{ x: number; y: number }> {
+  if (points.length < 2) return [];
+  const polyline: Array<{ x: number; y: number }> = [];
+  const segmentCount = closed ? points.length : points.length - 1;
+
+  const pushPoint = (x: number, y: number): void => {
+    const prev = polyline[polyline.length - 1];
+    if (prev && Math.abs(prev.x - x) < 0.0001 && Math.abs(prev.y - y) < 0.0001) return;
+    polyline.push({ x, y });
+  };
+
+  for (let i = 0; i < segmentCount; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    if (i === 0) pushPoint(a.x, a.y);
+
+    const approxLen =
+      Math.hypot(a.x - a.outX, a.y - a.outY) +
+      Math.hypot(a.outX - b.inX, a.outY - b.inY) +
+      Math.hypot(b.inX - b.x, b.inY - b.y);
+    const steps = Math.max(6, Math.min(64, Math.round(approxLen * 120)));
+
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      const omt = 1 - t;
+      const x =
+        omt * omt * omt * a.x +
+        3 * omt * omt * t * a.outX +
+        3 * omt * t * t * b.inX +
+        t * t * t * b.x;
+      const y =
+        omt * omt * omt * a.y +
+        3 * omt * omt * t * a.outY +
+        3 * omt * t * t * b.inY +
+        t * t * t * b.y;
+      pushPoint(x, y);
+    }
+  }
+
+  if (closed && polyline.length > 2) {
+    const first = polyline[0];
+    const last = polyline[polyline.length - 1];
+    if (Math.abs(first.x - last.x) < 0.0001 && Math.abs(first.y - last.y) < 0.0001) {
+      polyline.pop();
+    }
+  }
+
+  return polyline;
+}
+
+function buildPointInPolygonExpression(points: Array<{ x: number; y: number }>): string | null {
+  if (points.length < 3) return null;
+  const yExpr = '(Y/H)';
+  const xExpr = '(X/W)';
+  const intersections: string[] = [];
+
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    const ax = a.x.toFixed(6);
+    const ay = a.y.toFixed(6);
+    const bx = b.x.toFixed(6);
+    const by = b.y.toFixed(6);
+    const crosses = `mod(gt(${ay},${yExpr})+gt(${by},${yExpr}),2)`;
+    const xIntersect = `${ax}+(((${bx})-(${ax}))*(${yExpr}-(${ay}))/(((${by})-(${ay}))+0.000001))`;
+    intersections.push(`((${crosses})*lt(${xExpr},${xIntersect}))`);
+  }
+
+  return `mod(${intersections.join('+')},2)`;
+}
+
+function escapeFfmpegExpression(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/,/g, '\\,');
 }
 
 function adaptStoredSequenceToCore(
@@ -924,6 +1425,58 @@ function adaptStoredGenerator(generator: StoredClipData['generator']): ClipItem[
   return { kind: generator.kind };
 }
 
+function adaptStoredMasks(rawMasks: StoredClipData['masks']): ClipItem['masks'] {
+  if (!Array.isArray(rawMasks)) return [];
+  const masks: ClipItem['masks'] = [];
+
+  for (const raw of rawMasks) {
+    if (!raw || typeof raw !== 'object') continue;
+    const keyframes: ClipItem['masks'][number]['keyframes'] = [];
+    for (const rawKf of raw.keyframes ?? []) {
+      if (!rawKf || typeof rawKf !== 'object') continue;
+      const points = (rawKf.points ?? [])
+        .map((p) => {
+          if (!p || typeof p !== 'object') return null;
+          const x = typeof p.x === 'number' ? p.x : 0;
+          const y = typeof p.y === 'number' ? p.y : 0;
+          return {
+            x,
+            y,
+            inX: typeof p.inX === 'number' ? p.inX : x,
+            inY: typeof p.inY === 'number' ? p.inY : y,
+            outX: typeof p.outX === 'number' ? p.outX : x,
+            outY: typeof p.outY === 'number' ? p.outY : y,
+          };
+        })
+        .filter((p): p is NonNullable<typeof p> => p != null);
+
+      keyframes.push({
+        id:
+          typeof rawKf.id === 'string' && rawKf.id.length > 0
+            ? rawKf.id
+            : nanoid(12),
+        frame: Math.max(0, Math.round(typeof rawKf.frame === 'number' ? rawKf.frame : 0)),
+        points,
+      });
+    }
+    keyframes.sort((a, b) => a.frame - b.frame);
+
+    masks.push({
+      id: typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : nanoid(12),
+      name: typeof raw.name === 'string' && raw.name.trim().length > 0 ? raw.name : 'Mask',
+      mode: raw.mode === 'subtract' || raw.mode === 'intersect' ? raw.mode : 'add',
+      closed: raw.closed !== false,
+      invert: raw.invert === true,
+      opacity: clamp01(typeof raw.opacity === 'number' ? raw.opacity : 1),
+      feather: Math.max(0, typeof raw.feather === 'number' ? raw.feather : 0),
+      expansion: typeof raw.expansion === 'number' ? raw.expansion : 0,
+      keyframes,
+    });
+  }
+
+  return masks;
+}
+
 function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameRate): ClipItem[] {
   const coreClips = clips.map((clip) => {
     const startTime = clip.startTime ?? framesToTimeValue(clip.startFrame ?? 0, rate);
@@ -972,7 +1525,7 @@ function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameR
       keyframes: adaptStoredKeyframes(clip, rate),
       transitionIn: adaptStoredTransition(clip.transitionIn, rate),
       transitionOut: adaptStoredTransition(clip.transitionOut, rate),
-      masks: [],
+      masks: adaptStoredMasks(clip.masks),
       generator: adaptStoredGenerator(clip.generator),
       disabled: clip.disabled ?? false,
     };
@@ -1111,6 +1664,16 @@ function resolveTransitionOpacityMultiplier(
   return 1;
 }
 
+function resolveFadeBlackOverlayOpacity(
+  type: string | null,
+  progress: number | null,
+  phase: 'in' | 'out' | null,
+): number {
+  if (type !== 'fade-black' || progress == null || !phase) return 0;
+  const t = clamp01(progress);
+  return phase === 'in' ? 1 - t : t;
+}
+
 function resolveTransitionAudioGain(
   type: string | null,
   progress: number | null,
@@ -1149,7 +1712,7 @@ export const __test__ = {
   resolveOutputDir,
 };
 
-async function resolveMediaPaths(sequence: Sequence): Promise<Map<string, string>> {
+async function resolveMediaInputs(sequence: Sequence): Promise<ResolvedMediaInputs> {
   const db = getDb();
   const assetIds = new Set<string>();
 
@@ -1159,15 +1722,22 @@ async function resolveMediaPaths(sequence: Sequence): Promise<Map<string, string
     }
   }
 
-  const map = new Map<string, string>();
+  const pathById = new Map<string, string>();
+  const dimensionsById = new Map<string, MediaDimensions>();
   for (const assetId of assetIds) {
     const row = db.select().from(mediaAssets).where(eq(mediaAssets.id, assetId)).get();
     if (row && fs.existsSync(row.filePath)) {
-      map.set(assetId, row.filePath);
+      pathById.set(assetId, row.filePath);
+      if (typeof row.width === 'number' && row.width > 0 && typeof row.height === 'number' && row.height > 0) {
+        dimensionsById.set(assetId, {
+          width: row.width,
+          height: row.height,
+        });
+      }
     }
   }
 
-  return map;
+  return { pathById, dimensionsById };
 }
 
 function sanitizeFilename(filename: string | undefined, fallback: string): string {
