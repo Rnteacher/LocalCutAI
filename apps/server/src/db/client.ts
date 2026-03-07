@@ -21,7 +21,7 @@ export function initDatabase() {
 
   db = drizzle(sqlite, { schema });
 
-  // Run basic schema creation
+  // Manual bootstrap schema is the single source of truth for now (no migration runner).
   createTablesIfNotExist(sqlite);
 
   return db;

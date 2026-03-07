@@ -4,13 +4,17 @@
 
 const BASE_URL = '/api';
 
-async function request<T>(
-  path: string,
-  options: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers as HeadersInit | undefined);
+  const hasBody = options.body != null;
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  if (hasBody && !isFormData && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers as Record<string, string> },
     ...options,
+    headers,
   });
 
   if (!res.ok) {
@@ -116,8 +120,7 @@ export interface ApiExportPreset {
 
 export const api = {
   projects: {
-    list: () =>
-      request<{ success: boolean; data: ApiProject[] }>('/projects').then((r) => r.data),
+    list: () => request<{ success: boolean; data: ApiProject[] }>('/projects').then((r) => r.data),
 
     get: (id: string) =>
       request<{ success: boolean; data: ApiProject }>(`/projects/${id}`).then((r) => r.data),
@@ -134,15 +137,14 @@ export const api = {
         body: JSON.stringify(body),
       }).then((r) => r.data),
 
-    delete: (id: string) =>
-      request<{ success: boolean }>(`/projects/${id}`, { method: 'DELETE' }),
+    delete: (id: string) => request<{ success: boolean }>(`/projects/${id}`, { method: 'DELETE' }),
   },
 
   media: {
     list: (projectId: string) =>
-      request<{ success: boolean; data: ApiMediaAsset[] }>(
-        `/projects/${projectId}/media`,
-      ).then((r) => r.data),
+      request<{ success: boolean; data: ApiMediaAsset[] }>(`/projects/${projectId}/media`).then(
+        (r) => r.data,
+      ),
 
     import: (projectId: string, filePaths: string[]) =>
       request<{ success: boolean; data: { imported: ApiMediaAsset[]; errors: unknown[] } }>(
@@ -150,26 +152,68 @@ export const api = {
         { method: 'POST', body: JSON.stringify({ filePaths }) },
       ).then((r) => r.data),
 
+    /** Upload files via multipart form-data (native file picker / drag-and-drop). */
+    upload: async (
+      projectId: string,
+      files: FileList | File[],
+    ): Promise<{ imported: ApiMediaAsset[]; errors: { name: string; error: string }[] }> => {
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append('files', file, file.name);
+      }
+
+      const res = await fetch(`${BASE_URL}/projects/${projectId}/media/upload`, {
+        method: 'POST',
+        body: formData,
+        // Note: do NOT set Content-Type header — browser sets it with boundary
+      });
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+
+      const json = (await res.json()) as {
+        success: boolean;
+        data: { imported: ApiMediaAsset[]; errors: { name: string; error: string }[] };
+      };
+      return json.data;
+    },
+
     get: (projectId: string, assetId: string) =>
       request<{ success: boolean; data: ApiMediaAsset }>(
         `/projects/${projectId}/media/${assetId}`,
       ).then((r) => r.data),
 
     delete: (projectId: string, assetId: string) =>
-      request<{ success: boolean }>(
-        `/projects/${projectId}/media/${assetId}`,
-        { method: 'DELETE' },
-      ),
+      request<{ success: boolean }>(`/projects/${projectId}/media/${assetId}`, {
+        method: 'DELETE',
+      }),
 
     /** URL for streaming a media file with Range support. */
     fileUrl: (assetId: string) => `/api/media-file/${assetId}`,
+
+    /** Fetch waveform peak data for a media asset. */
+    waveform: (assetId: string, samples = 800) =>
+      request<{
+        success: boolean;
+        data: { peaks: number[]; sampleRate: number; duration: number };
+      }>(`/media-file/${assetId}/waveform?samples=${samples}`).then((r) => r.data),
   },
 
   sequences: {
     get: (id: string) =>
       request<{ success: boolean; data: ApiSequence }>(`/sequences/${id}`).then((r) => r.data),
 
-    update: (id: string, body: { name?: string; data?: Record<string, unknown> }) =>
+    update: (
+      id: string,
+      body: {
+        name?: string;
+        data?: Record<string, unknown>;
+        frameRate?: { num: number; den: number };
+        resolution?: { width: number; height: number };
+      },
+    ) =>
       request<{ success: boolean; data: ApiSequence }>(`/sequences/${id}`, {
         method: 'PUT',
         body: JSON.stringify(body),
@@ -185,8 +229,7 @@ export const api = {
       return request<{ success: boolean; data: ApiJob[] }>(`/jobs${qs}`).then((r) => r.data);
     },
 
-    delete: (id: string) =>
-      request<{ success: boolean }>(`/jobs/${id}`, { method: 'DELETE' }),
+    delete: (id: string) => request<{ success: boolean }>(`/jobs/${id}`, { method: 'DELETE' }),
   },
 
   export: {

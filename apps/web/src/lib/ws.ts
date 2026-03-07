@@ -12,12 +12,23 @@ export interface WsMessage {
 let socket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const handlers = new Set<MessageHandler>();
+let shouldReconnect = false;
 
-const WS_URL = `ws://${window.location.hostname || 'localhost'}:9470/ws`;
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws`;
 const RECONNECT_DELAY = 3000;
 
+function clearReconnectTimer() {
+  if (!reconnectTimer) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
 function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+  if (!shouldReconnect || handlers.size === 0) return;
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+  ) {
     return;
   }
 
@@ -38,6 +49,8 @@ function connect() {
     };
 
     socket.onclose = () => {
+      socket = null;
+      if (!shouldReconnect || handlers.size === 0) return;
       console.log('[WS] Disconnected, reconnecting...');
       scheduleReconnect();
     };
@@ -51,6 +64,7 @@ function connect() {
 }
 
 function scheduleReconnect() {
+  if (!shouldReconnect || handlers.size === 0) return;
   if (reconnectTimer) return;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
@@ -67,15 +81,22 @@ export function subscribe(handler: MessageHandler): () => void {
 
   // Auto-connect on first subscriber
   if (handlers.size === 1) {
+    shouldReconnect = true;
+    clearReconnectTimer();
     connect();
   }
 
   return () => {
     handlers.delete(handler);
-    // Disconnect when no subscribers
-    if (handlers.size === 0 && socket) {
-      socket.close();
-      socket = null;
+
+    // Disconnect and stop reconnect loop when no subscribers remain.
+    if (handlers.size === 0) {
+      shouldReconnect = false;
+      clearReconnectTimer();
+      if (socket) {
+        socket.close();
+        socket = null;
+      }
     }
   };
 }

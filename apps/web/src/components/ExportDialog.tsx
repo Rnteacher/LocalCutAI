@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../lib/api.js';
+import { on as onWs } from '../lib/ws.js';
 import type { ApiExportPreset, ExportStartParams } from '../lib/api.js';
 import { useProjectStore } from '../stores/projectStore.js';
 
@@ -39,31 +40,31 @@ export function ExportDialog({ sequenceId, onClose }: ExportDialogProps) {
     setFilename(`export-${ts}.${ext}`);
   }, [selectedPreset, presets]);
 
-  // Listen for WebSocket progress updates
+    // Listen for WebSocket progress updates
   useEffect(() => {
     if (!jobId) return;
 
-    const ws = new WebSocket(`ws://${window.location.hostname}:9470/ws`);
-    ws.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === 'job:progress' && msg.data?.jobId === jobId) {
-          setProgress(msg.data.progress);
-          setStatus(msg.data.status);
-          if (msg.data.status === 'completed') {
-            setIsExporting(false);
-          }
-          if (msg.data.status === 'failed') {
-            setIsExporting(false);
-            setError('Export failed. Check the server logs for details.');
-          }
-        }
-      } catch {
-        // Ignore parse errors
-      }
-    };
+    const unsubscribe = onWs('job:progress', (data) => {
+      if (data?.jobId !== jobId) return;
 
-    // Also poll for status as fallback
+      const nextProgress = typeof data.progress === 'number' ? data.progress : 0;
+      const nextStatus = typeof data.status === 'string' ? data.status : '';
+      setProgress(nextProgress);
+      setStatus(nextStatus);
+
+      if (nextStatus === 'completed') {
+        setIsExporting(false);
+      }
+      if (nextStatus === 'failed') {
+        setIsExporting(false);
+        setError('Export failed. Check the server logs for details.');
+      }
+      if (nextStatus === 'cancelled') {
+        setIsExporting(false);
+      }
+    });
+
+    // Poll as fallback in case WS disconnects or message is missed.
     const interval = setInterval(async () => {
       try {
         const job = await api.jobs.get(jobId);
@@ -82,7 +83,7 @@ export function ExportDialog({ sequenceId, onClose }: ExportDialogProps) {
     }, 2000);
 
     return () => {
-      ws.close();
+      unsubscribe();
       clearInterval(interval);
     };
   }, [jobId]);
@@ -139,7 +140,7 @@ export function ExportDialog({ sequenceId, onClose }: ExportDialogProps) {
             className="text-zinc-500 hover:text-zinc-300"
             disabled={isExporting}
           >
-            ✕
+            x
           </button>
         </div>
 
@@ -224,7 +225,7 @@ export function ExportDialog({ sequenceId, onClose }: ExportDialogProps) {
           {/* Completed status */}
           {status === 'completed' && !isExporting && (
             <div className="rounded border border-green-800 bg-green-900/30 px-3 py-2 text-xs text-green-400">
-              ✓ Export completed successfully!
+              Export completed successfully!
               {outputPath && (
                 <div className="mt-1 text-green-500/70">{outputPath}</div>
               )}
