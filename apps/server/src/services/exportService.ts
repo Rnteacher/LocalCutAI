@@ -230,6 +230,7 @@ interface AudioSegment {
 
 const activeProcesses = new Map<string, ChildProcess>();
 type ProgressCallback = (jobId: string, progress: number, status: string) => void;
+const ANIMATION_EPSILON = 1e-6;
 
 export async function startExport(
   params: ExportParams,
@@ -716,6 +717,71 @@ function buildFFmpegArgs(
   return args;
 }
 
+function keyframesAreAnimated(
+  keyframes: ClipItem['keyframes'],
+  propertyFilter?: (property: ClipItem['keyframes'][number]['property']) => boolean,
+): boolean {
+  const groups = new Map<
+    ClipItem['keyframes'][number]['property'],
+    Array<{ frame: number; value: number }>
+  >();
+
+  for (const kf of keyframes) {
+    if (propertyFilter && !propertyFilter(kf.property)) continue;
+    const entries = groups.get(kf.property) ?? [];
+    entries.push({ frame: kf.time.frames, value: kf.value });
+    groups.set(kf.property, entries);
+  }
+
+  for (const entries of groups.values()) {
+    if (entries.length < 2) continue;
+    entries.sort((a, b) => a.frame - b.frame);
+    for (let i = 1; i < entries.length; i++) {
+      const prev = entries[i - 1];
+      const next = entries[i];
+      if (next.frame <= prev.frame) continue;
+      if (Math.abs(next.value - prev.value) > ANIMATION_EPSILON) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function maskPointsEqual(a: ClipItem['masks'][number]['keyframes'][number]['points'], b: ClipItem['masks'][number]['keyframes'][number]['points']): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const pa = a[i];
+    const pb = b[i];
+    if (
+      Math.abs(pa.x - pb.x) > ANIMATION_EPSILON ||
+      Math.abs(pa.y - pb.y) > ANIMATION_EPSILON ||
+      Math.abs(pa.inX - pb.inX) > ANIMATION_EPSILON ||
+      Math.abs(pa.inY - pb.inY) > ANIMATION_EPSILON ||
+      Math.abs(pa.outX - pb.outX) > ANIMATION_EPSILON ||
+      Math.abs(pa.outY - pb.outY) > ANIMATION_EPSILON
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function maskShapeKeyframesAreAnimated(keyframes: ClipItem['masks'][number]['keyframes']): boolean {
+  if (keyframes.length < 2) return false;
+  const sorted = [...keyframes].sort((a, b) => a.frame - b.frame);
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const next = sorted[i];
+    if (next.frame <= prev.frame) continue;
+    if (!maskPointsEqual(prev.points, next.points)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function extractSegments(sequence: Sequence): {
   videoSegments: VideoSegment[];
   audioSegments: AudioSegment[];
@@ -762,29 +828,21 @@ function extractSegments(sequence: Sequence): {
       }
 
       const sortedKfs = [...clip.keyframes].sort((a, b) => a.time.frames - b.time.frames);
-      if (sortedKfs.length > 1) {
+      if (sortedKfs.length > 1 && keyframesAreAnimated(sortedKfs)) {
         const kStart = Math.max(0, sortedKfs[0].time.frames);
         const kEnd = Math.min(clip.duration.frames, sortedKfs[sortedKfs.length - 1].time.frames);
         for (let f = kStart; f <= kEnd; f++) {
           boundaries.add(start + f);
         }
-      } else {
-        for (const kf of sortedKfs) {
-          boundaries.add(start + Math.max(0, kf.time.frames));
-        }
       }
 
       for (const mask of clip.masks ?? []) {
         const sortedMaskKfs = [...mask.keyframes].sort((a, b) => a.frame - b.frame);
-        if (sortedMaskKfs.length > 1) {
+        if (sortedMaskKfs.length > 1 && maskShapeKeyframesAreAnimated(sortedMaskKfs)) {
           const mStart = Math.max(0, sortedMaskKfs[0].frame);
           const mEnd = Math.min(clip.duration.frames, sortedMaskKfs[sortedMaskKfs.length - 1].frame);
           for (let f = mStart; f <= mEnd; f++) {
             boundaries.add(start + f);
-          }
-        } else {
-          for (const kf of sortedMaskKfs) {
-            boundaries.add(start + Math.max(0, kf.frame));
           }
         }
       }
@@ -848,15 +906,16 @@ function extractSegments(sequence: Sequence): {
       const blendMode = layer.blendMode;
       const silhouetteGamma = clampRange(clip?.blendParams?.silhouetteGamma ?? 1, 0.1, 8);
       const clipLocalStartFrame = clip ? Math.max(0, frameStart - clip.startTime.frames) : 0;
-      const hasAnimatedMaskShape =
-        (clip?.masks ?? []).some((mask) => (mask.keyframes?.length ?? 0) > 1);
-      const hasAnimatedMaskParams =
-        (clip?.keyframes ?? []).filter(
-          (kf) =>
-            kf.property === 'mask.opacity' ||
-            kf.property === 'mask.feather' ||
-            kf.property === 'mask.expansion',
-        ).length > 1;
+      const hasAnimatedMaskShape = (clip?.masks ?? []).some((mask) =>
+        maskShapeKeyframesAreAnimated(mask.keyframes ?? []),
+      );
+      const hasAnimatedMaskParams = keyframesAreAnimated(
+        clip?.keyframes ?? [],
+        (property) =>
+          property === 'mask.opacity' ||
+          property === 'mask.feather' ||
+          property === 'mask.expansion',
+      );
       const maskMergeToken =
         hasAnimatedMaskShape || hasAnimatedMaskParams ? `maskf:${clipLocalStartFrame}` : 'maskf:static';
 

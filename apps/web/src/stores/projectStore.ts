@@ -297,6 +297,12 @@ interface ProjectState {
     keyframe: MaskShapeKeyframe,
   ) => Promise<void>;
   removeMaskShapeKeyframe: (clipId: string, maskId: string, keyframeId: string) => Promise<void>;
+  insertMaskPointAcrossKeyframes: (
+    clipId: string,
+    maskId: string,
+    params: { frame: number; insertAt: number; point?: MaskPoint },
+  ) => Promise<void>;
+  removeMaskPointAcrossKeyframes: (clipId: string, maskId: string, pointIndex: number) => Promise<void>;
   rippleTrimClip: (
     clipId: string,
     newStartFrame: number,
@@ -627,6 +633,41 @@ function normalizeMasks(raw: unknown): ManualMaskData[] {
     });
   }
   return masks;
+}
+
+function cloneMaskPoint(point: MaskPoint): MaskPoint {
+  return {
+    x: point.x,
+    y: point.y,
+    inX: point.inX,
+    inY: point.inY,
+    outX: point.outX,
+    outY: point.outY,
+  };
+}
+
+function midpointMaskPoint(a: MaskPoint, b: MaskPoint): MaskPoint {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    inX: (a.inX + b.inX) / 2,
+    inY: (a.inY + b.inY) / 2,
+    outX: (a.outX + b.outX) / 2,
+    outY: (a.outY + b.outY) / 2,
+  };
+}
+
+function fallbackInsertedMaskPoint(points: MaskPoint[], insertAt: number): MaskPoint {
+  if (points.length === 0) {
+    return { x: 0, y: 0, inX: 0, inY: 0, outX: 0, outY: 0 };
+  }
+  if (insertAt <= 0) {
+    return cloneMaskPoint(points[0]);
+  }
+  if (insertAt >= points.length) {
+    return cloneMaskPoint(points[points.length - 1]);
+  }
+  return midpointMaskPoint(points[insertAt - 1], points[insertAt]);
 }
 
 function normalizeGenerator(raw: unknown): GeneratorData | null {
@@ -2462,6 +2503,105 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         return { ...c, masks };
       }),
     }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  insertMaskPointAcrossKeyframes: async (
+    clipId: string,
+    maskId: string,
+    params: { frame: number; insertAt: number; point?: MaskPoint },
+  ) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+    const targetFrame = Math.max(0, Math.round(params.frame));
+    const insertAtIndex = Math.max(0, Math.round(params.insertAt));
+    const explicitPoint = params.point ? cloneMaskPoint(params.point) : null;
+    let changed = false;
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = (c.masks ?? []).map((m) => {
+          if (m.id !== maskId) return m;
+          const keyframes = (m.keyframes ?? []).map((kf) => {
+            const points = (kf.points ?? []).map(cloneMaskPoint);
+            if (points.length === 0 && !explicitPoint) return kf;
+            const clampedInsertAt = Math.max(0, Math.min(points.length, insertAtIndex));
+            const inserted =
+              kf.frame === targetFrame && explicitPoint
+                ? cloneMaskPoint(explicitPoint)
+                : fallbackInsertedMaskPoint(points, clampedInsertAt);
+            const nextPoints = [...points];
+            nextPoints.splice(clampedInsertAt, 0, inserted);
+            changed = true;
+            return { ...kf, points: nextPoints };
+          });
+          return { ...m, keyframes };
+        });
+        return { ...c, masks };
+      }),
+    }));
+
+    if (!changed) return;
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  removeMaskPointAcrossKeyframes: async (clipId: string, maskId: string, pointIndex: number) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+    const requestedIndex = Math.max(0, Math.round(pointIndex));
+    let changed = false;
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = (c.masks ?? []).map((m) => {
+          if (m.id !== maskId) return m;
+          const keyframes = (m.keyframes ?? []).map((kf) => {
+            const points = (kf.points ?? []).map(cloneMaskPoint);
+            if (points.length <= 2) return kf;
+            const idx = Math.max(0, Math.min(points.length - 1, requestedIndex));
+            points.splice(idx, 1);
+            changed = true;
+            return { ...kf, points };
+          });
+          return { ...m, keyframes };
+        });
+        return { ...c, masks };
+      }),
+    }));
+
+    if (!changed) return;
 
     const updatedData = { ...data, tracks: updatedTracks };
     try {

@@ -268,6 +268,110 @@ describe('ExportService core-plan integration', () => {
     expect(segments.videoSegments.some((s: any) => s.clipLocalStartFrame > 0)).toBe(true);
   });
 
+  it('does not split video segments per-frame when clip keyframes are static', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-static-kf',
+      projectId: 'proj1',
+      name: 'Sequence static kf',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              keyframes: [
+                { id: 'k1', property: 'opacity', frame: 0, value: 0.7 },
+                { id: 'k2', property: 'opacity', frame: 23, value: 0.7 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const segments = mod.__test__.extractSegments(sequence);
+    expect(segments.videoSegments.length).toBe(1);
+  });
+
+  it('does not split video segments per-frame when mask shape keyframes are static', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-static-mask',
+      projectId: 'proj1',
+      name: 'Sequence static mask',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const square = [
+      { x: 0.2, y: 0.2 },
+      { x: 0.8, y: 0.2 },
+      { x: 0.8, y: 0.8 },
+      { x: 0.2, y: 0.8 },
+    ];
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              masks: [
+                {
+                  id: 'm1',
+                  mode: 'add',
+                  closed: true,
+                  invert: false,
+                  opacity: 1,
+                  feather: 0,
+                  expansion: 0,
+                  keyframes: [
+                    { id: 'mk1', frame: 0, points: square },
+                    { id: 'mk2', frame: 23, points: square },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const segments = mod.__test__.extractSegments(sequence);
+    expect(segments.videoSegments.length).toBe(1);
+  });
+
   it('builds ffmpeg args with transform filters', async () => {
     const mod = await import('./exportService.js');
     const seqRow = {

@@ -143,6 +143,9 @@ interface KeyframeDragState {
   clipDurationFrames: number;
 }
 
+type TransitionLimitInputTrack = Parameters<typeof computeTransitionSideLimit>[0]['track'];
+type TransitionLimitInputClip = Parameters<typeof computeTransitionSideLimit>[0]['clip'];
+
 function normalizeTransitionType(type: string | undefined): 'cross-dissolve' | 'fade-black' {
   return type === 'fade-black' ? 'fade-black' : 'cross-dissolve';
 }
@@ -1687,8 +1690,8 @@ export function Timeline() {
                   const transitionInLimit =
                     clip.transitionIn && transitionInDuration != null
                       ? computeTransitionSideLimit({
-                          track: track as any,
-                          clip: clip as any,
+                          track: track as TransitionLimitInputTrack,
+                          clip: clip as TransitionLimitInputClip,
                           side: 'in',
                           type: normalizeTransitionType(clip.transitionIn.type),
                           requestedDurationFrames: transitionInDuration,
@@ -1699,8 +1702,8 @@ export function Timeline() {
                   const transitionOutLimit =
                     clip.transitionOut && transitionOutDuration != null
                       ? computeTransitionSideLimit({
-                          track: track as any,
-                          clip: clip as any,
+                          track: track as TransitionLimitInputTrack,
+                          clip: clip as TransitionLimitInputClip,
                           side: 'out',
                           type: normalizeTransitionType(clip.transitionOut.type),
                           requestedDurationFrames: transitionOutDuration,

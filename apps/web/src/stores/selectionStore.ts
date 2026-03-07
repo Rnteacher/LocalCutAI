@@ -7,6 +7,7 @@ import { create } from 'zustand';
 import type { ApiMediaAsset } from '../lib/api.js';
 
 interface SelectionState {
+  rendererMode: 'auto' | 'canvas2d' | 'webgl2';
   selectedClipIds: Set<string>;
   selectedClipId: string | null;
   selectedTrackId: string | null;
@@ -36,6 +37,7 @@ interface SelectionState {
   selectClip: (clipId: string, addToSelection?: boolean) => void;
   deselectClip: (clipId: string) => void;
   clearClipSelection: () => void;
+  setRendererMode: (mode: SelectionState['rendererMode']) => void;
   selectTrack: (trackId: string | null) => void;
   setActivePanel: (panel: SelectionState['activePanel']) => void;
   setTimelineTool: (tool: SelectionState['timelineTool']) => void;
@@ -52,6 +54,7 @@ interface SelectionState {
 }
 
 export const useSelectionStore = create<SelectionState>((set, get) => ({
+  rendererMode: 'auto',
   selectedClipIds: new Set<string>(),
   selectedClipId: null,
   selectedTrackId: null,
@@ -92,6 +95,8 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
   },
 
   clearClipSelection: () => set({ selectedClipIds: new Set(), selectedClipId: null }),
+
+  setRendererMode: (mode) => set({ rendererMode: mode }),
 
   selectTrack: (trackId) => set({ selectedTrackId: trackId }),
 

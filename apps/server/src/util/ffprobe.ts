@@ -75,7 +75,7 @@ export async function probeFile(filePath: string): Promise<ProbeResult> {
       codec: videoStream?.codec_name ?? audioStream?.codec_name ?? null,
       mimeType,
     };
-  } catch (err) {
+  } catch {
     // If ffprobe fails, return defaults
     return {
       duration: null,

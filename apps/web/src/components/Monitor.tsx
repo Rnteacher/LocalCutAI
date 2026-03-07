@@ -139,7 +139,11 @@ export function SourceMonitor() {
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v || !v.src) return;
-    v.paused ? v.play().catch(() => {}) : v.pause();
+    if (v.paused) {
+      void v.play().catch(() => {});
+    } else {
+      v.pause();
+    }
   }, []);
   const stepFwd = useCallback(() => {
     const v = videoRef.current;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { ReactNode, WheelEvent as ReactWheelEvent } from 'react';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
 import { applyKeyframeEasing } from '../lib/keyframeEasing.js';
@@ -311,12 +311,14 @@ function KeyframeMiniGraph({
   clipDuration,
   property,
   currentFrame,
+  snapStep,
   onCommit,
 }: {
   keyframes: NonNullable<TimelineClipData['keyframes']>;
   clipDuration: number;
   property: KeyframeProperty;
   currentFrame: number;
+  snapStep: number;
   onCommit: (
     keyframeId: string,
     patch: Partial<
@@ -342,10 +344,20 @@ function KeyframeMiniGraph({
   const [draggingHandle, setDraggingHandle] = useState<{ keyframeId: string; handle: 'in' | 'out' } | null>(
     null,
   );
+  const [viewStartFrame, setViewStartFrame] = useState(0);
+  const [viewEndFrame, setViewEndFrame] = useState(Math.max(1, clipDuration));
+
+  const safeSnapStep = Math.max(1, Math.round(snapStep));
+  const totalDuration = Math.max(1, clipDuration);
 
   useEffect(() => {
     setDraftById({});
   }, [property]);
+
+  useEffect(() => {
+    setViewStartFrame(0);
+    setViewEndFrame(totalDuration);
+  }, [totalDuration, property]);
 
   const sorted = useMemo(() => [...keyframes].sort((a, b) => a.frame - b.frame), [keyframes]);
   const effective = useMemo(
@@ -367,8 +379,16 @@ function KeyframeMiniGraph({
     effective.map((k) => k.value),
   );
   const span = Math.max(0.0001, bounds.max - bounds.min);
+  const frameWindowStart = Math.max(0, Math.min(totalDuration, viewStartFrame));
+  const frameWindowEnd = Math.max(
+    frameWindowStart + 1,
+    Math.min(totalDuration, viewEndFrame),
+  );
+  const frameWindowSpan = Math.max(1, frameWindowEnd - frameWindowStart);
   const toX = (frame: number): number =>
-    (Math.max(0, frame) / Math.max(1, clipDuration)) * 100;
+    ((Math.max(frameWindowStart, Math.min(frameWindowEnd, frame)) - frameWindowStart) /
+      frameWindowSpan) *
+    100;
   const toY = (value: number): number =>
     100 - ((value - bounds.min) / span) * 100;
 
@@ -388,8 +408,8 @@ function KeyframeMiniGraph({
       const y0 = toY(from.value);
       if (i === 0) d += `M ${x0.toFixed(3)} ${y0.toFixed(3)}`;
 
-      const spanFrames = Math.max(1, to.frame - from.frame);
-      const steps = Math.max(8, Math.min(56, Math.round(spanFrames / Math.max(1, clipDuration) * 180)));
+      const segmentFrames = Math.max(1, to.frame - from.frame);
+      const steps = Math.max(8, Math.min(56, Math.round((segmentFrames / frameWindowSpan) * 160)));
       for (let step = 1; step <= steps; step++) {
         const t = step / steps;
         const eased = applyKeyframeEasing(
@@ -397,14 +417,22 @@ function KeyframeMiniGraph({
           from.easing,
           from.bezierHandles,
         );
-        const frame = from.frame + spanFrames * t;
+        const frame = from.frame + segmentFrames * t;
         const value = from.value + (to.value - from.value) * eased;
         d += ` L ${toX(frame).toFixed(3)} ${toY(value).toFixed(3)}`;
       }
     }
     return d;
-  }, [effective, clipDuration, span, bounds.min]);
-  const currentX = (Math.max(0, Math.min(clipDuration, currentFrame)) / Math.max(1, clipDuration)) * 100;
+  }, [effective, frameWindowSpan, toX, toY]);
+  const currentX =
+    ((Math.max(frameWindowStart, Math.min(frameWindowEnd, currentFrame)) - frameWindowStart) /
+      frameWindowSpan) *
+    100;
+
+  const fitFrameWindow = useCallback(() => {
+    setViewStartFrame(0);
+    setViewEndFrame(totalDuration);
+  }, [totalDuration]);
 
   const updateFromPointer = useCallback(
     (keyframeId: string, clientX: number, clientY: number) => {
@@ -413,11 +441,12 @@ function KeyframeMiniGraph({
       const rect = svg.getBoundingClientRect();
       const nx = clamp01((clientX - rect.left) / Math.max(1, rect.width));
       const ny = clamp01((clientY - rect.top) / Math.max(1, rect.height));
-      const frame = Math.max(0, Math.round(nx * clipDuration));
+      const rawFrame = frameWindowStart + nx * frameWindowSpan;
+      const frame = Math.max(0, Math.min(totalDuration, Math.round(rawFrame / safeSnapStep) * safeSnapStep));
       const value = bounds.min + (1 - ny) * (bounds.max - bounds.min);
       setDraftById((prev) => ({ ...prev, [keyframeId]: { frame, value } }));
     },
-    [bounds.max, bounds.min, clipDuration],
+    [bounds.max, bounds.min, frameWindowSpan, frameWindowStart, totalDuration, safeSnapStep],
   );
 
   const updateHandleFromPointer = useCallback(
@@ -517,13 +546,76 @@ function KeyframeMiniGraph({
     };
   }, [draggingPointId, draggingHandle, draftById, onCommit, updateFromPointer, updateHandleFromPointer]);
 
+  const onGraphWheel = useCallback(
+    (e: ReactWheelEvent<SVGSVGElement>) => {
+      e.preventDefault();
+      if (!svgRef.current) return;
+      const rect = svgRef.current.getBoundingClientRect();
+      const nx = clamp01((e.clientX - rect.left) / Math.max(1, rect.width));
+      const focalFrame = frameWindowStart + nx * frameWindowSpan;
+      const minSpan = Math.max(2, safeSnapStep);
+
+      if (e.shiftKey) {
+        const deltaFrames = (e.deltaY / 120) * frameWindowSpan * 0.2;
+        let nextStart = frameWindowStart + deltaFrames;
+        let nextEnd = frameWindowEnd + deltaFrames;
+        if (nextStart < 0) {
+          nextEnd -= nextStart;
+          nextStart = 0;
+        }
+        if (nextEnd > totalDuration) {
+          const over = nextEnd - totalDuration;
+          nextStart = Math.max(0, nextStart - over);
+          nextEnd = totalDuration;
+        }
+        setViewStartFrame(Math.max(0, Math.round(nextStart)));
+        setViewEndFrame(Math.max(minSpan, Math.round(nextEnd)));
+        return;
+      }
+
+      const zoomFactor = e.deltaY > 0 ? 1.12 : 0.88;
+      let nextSpan = Math.max(minSpan, Math.min(totalDuration, frameWindowSpan * zoomFactor));
+      if (totalDuration <= minSpan) nextSpan = totalDuration;
+
+      const ratio = frameWindowSpan > 0 ? (focalFrame - frameWindowStart) / frameWindowSpan : 0.5;
+      let nextStart = focalFrame - nextSpan * ratio;
+      let nextEnd = nextStart + nextSpan;
+      if (nextStart < 0) {
+        nextEnd -= nextStart;
+        nextStart = 0;
+      }
+      if (nextEnd > totalDuration) {
+        const over = nextEnd - totalDuration;
+        nextStart = Math.max(0, nextStart - over);
+        nextEnd = totalDuration;
+      }
+      if (nextEnd - nextStart < minSpan && totalDuration > minSpan) {
+        nextEnd = Math.min(totalDuration, nextStart + minSpan);
+      }
+      setViewStartFrame(Math.max(0, Math.round(nextStart)));
+      setViewEndFrame(Math.max(1, Math.round(nextEnd)));
+    },
+    [
+      frameWindowEnd,
+      frameWindowSpan,
+      frameWindowStart,
+      safeSnapStep,
+      totalDuration,
+    ],
+  );
+
   return (
     <svg
       ref={svgRef}
       viewBox="0 0 100 100"
       className="h-28 w-full rounded border border-zinc-700 bg-zinc-900/50"
+      onWheel={onGraphWheel}
+      onDoubleClick={fitFrameWindow}
     >
       <line x1={currentX} y1={0} x2={currentX} y2={100} stroke="#334155" strokeWidth="0.8" />
+      <text x={2} y={8} fill="#64748b" fontSize="4" fontFamily="monospace">
+        {`${frameWindowStart}f-${frameWindowEnd}f | snap ${safeSnapStep}f`}
+      </text>
       <path fill="none" stroke="#60a5fa" strokeWidth="1.6" d={curvePath} />
       {effective.map((k, index) => {
         if (k.easing !== 'bezier') return null;
@@ -624,6 +716,8 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const removeClipMask = useProjectStore((s) => s.removeClipMask);
   const upsertMaskShapeKeyframe = useProjectStore((s) => s.upsertMaskShapeKeyframe);
   const removeMaskShapeKeyframe = useProjectStore((s) => s.removeMaskShapeKeyframe);
+  const insertMaskPointAcrossKeyframes = useProjectStore((s) => s.insertMaskPointAcrossKeyframes);
+  const removeMaskPointAcrossKeyframes = useProjectStore((s) => s.removeMaskPointAcrossKeyframes);
   const currentFrame = usePlaybackStore((s) => s.currentFrame);
   const setCurrentFrame = usePlaybackStore((s) => s.setCurrentFrame);
   const fps = usePlaybackStore((s) => s.fps);
@@ -638,6 +732,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const [masksOpen, setMasksOpen] = useState(false);
   const [linkScale, setLinkScale] = useState(true);
   const [kfProperty, setKfProperty] = useState<KeyframeProperty>('transform.positionX');
+  const [graphSnapStep, setGraphSnapStep] = useState(1);
   const [selectedMaskId, setSelectedMaskId] = useState<string | null>(null);
   const [selectedMaskKeyframeId, setSelectedMaskKeyframeId] = useState<string | null>(null);
   const [selectedMaskPointIndex, setSelectedMaskPointIndex] = useState(0);
@@ -1269,6 +1364,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       addMaskKeyframeAtPlayhead();
       return;
     }
+    if (!selectedClip || !selectedMask) return;
     const points = cloneMaskPoints(selectedMaskKeyframe.points);
     if (points.length === 0) {
       const defaults = defaultMaskPoints();
@@ -1291,26 +1387,37 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       outX: (a.x + b.x) / 2,
       outY: (a.y + b.y) / 2,
     };
-    points.splice(nextIdx, 0, mid);
-    upsertSelectedMaskKeyframe({ ...selectedMaskKeyframe, points });
+    void insertMaskPointAcrossKeyframes(selectedClip.id, selectedMask.id, {
+      frame: selectedMaskKeyframe.frame,
+      insertAt: nextIdx,
+      point: mid,
+    });
     setSelectedMaskPointIndex(nextIdx);
   }, [
     selectedMaskKeyframe,
+    selectedClip,
+    selectedMask,
     selectedMaskPointIndex,
     cloneMaskPoints,
-    upsertSelectedMaskKeyframe,
     defaultMaskPoints,
     addMaskKeyframeAtPlayhead,
+    insertMaskPointAcrossKeyframes,
+    upsertSelectedMaskKeyframe,
   ]);
 
   const removeMaskPoint = useCallback(() => {
-    if (!selectedMaskKeyframe) return;
+    if (!selectedMaskKeyframe || !selectedClip || !selectedMask) return;
     if (selectedMaskKeyframe.points.length <= 2) return;
-    const points = cloneMaskPoints(selectedMaskKeyframe.points);
-    points.splice(selectedMaskPointIndex, 1);
-    upsertSelectedMaskKeyframe({ ...selectedMaskKeyframe, points });
-    setSelectedMaskPointIndex((idx) => Math.max(0, Math.min(idx, points.length - 1)));
-  }, [selectedMaskKeyframe, selectedMaskPointIndex, cloneMaskPoints, upsertSelectedMaskKeyframe]);
+    const idx = Math.max(0, Math.min(selectedMaskKeyframe.points.length - 1, selectedMaskPointIndex));
+    void removeMaskPointAcrossKeyframes(selectedClip.id, selectedMask.id, idx);
+    setSelectedMaskPointIndex(Math.max(0, Math.min(idx, selectedMaskKeyframe.points.length - 2)));
+  }, [
+    selectedMaskKeyframe,
+    selectedClip,
+    selectedMask,
+    selectedMaskPointIndex,
+    removeMaskPointAcrossKeyframes,
+  ]);
 
   const jumpMaskKeyframe = useCallback(
     (direction: -1 | 1) => {
@@ -1816,6 +1923,17 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                       </option>
                     ))}
                   </select>
+                  <select
+                    value={graphSnapStep}
+                    onChange={(e) => setGraphSnapStep(Math.max(1, Number(e.target.value) || 1))}
+                    className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-300"
+                    title="Graph drag snap in frames"
+                  >
+                    <option value={1}>Snap 1f</option>
+                    <option value={2}>Snap 2f</option>
+                    <option value={5}>Snap 5f</option>
+                    <option value={10}>Snap 10f</option>
+                  </select>
                   <button
                     className="rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500"
                     onClick={addKeyframeAtPlayhead}
@@ -1841,8 +1959,12 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   clipDuration={Math.max(1, selectedClip.durationFrames)}
                   property={kfProperty}
                   currentFrame={clipLocalFrame}
+                  snapStep={graphSnapStep}
                   onCommit={(keyframeId, patch) => updateSelectedKeyframe(keyframeId, patch)}
                 />
+                <div className="text-[10px] text-zinc-500">
+                  Wheel: zoom graph, Shift+Wheel: pan, Double-click: fit full clip.
+                </div>
 
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded border border-zinc-700 bg-zinc-900/40 p-1">
                   {selectedPropertyKeyframes.length === 0 && (
