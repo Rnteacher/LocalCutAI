@@ -3,10 +3,16 @@ import type { MouseEvent as ReactMouseEvent } from 'react';
 import { usePlaybackStore } from '../stores/playbackStore.js';
 import { useProjectStore } from '../stores/projectStore.js';
 import { useSelectionStore } from '../stores/selectionStore.js';
-import type { MaskPoint, TimelineClipData, TimelineTrackData } from '../stores/projectStore.js';
+import type {
+  MaskPoint,
+  TimelineClipData,
+  TimelineTrackData,
+  TimelineKeyframeData,
+} from '../stores/projectStore.js';
 import { api } from '../lib/api.js';
 import { adaptSequence } from '../lib/timelineAdapter.js';
 import { buildCompositionPlan } from '../lib/core.js';
+import { applyKeyframeEasing } from '../lib/keyframeEasing.js';
 
 interface ActiveLayer {
   clip: TimelineClipData;
@@ -53,6 +59,11 @@ interface MaskOverlayInfo {
   normalized: boolean;
   geometry: LayerGeometry;
   screenPoints: Array<{ x: number; y: number }>;
+  centerMask: { x: number; y: number };
+  centerScreen: { x: number; y: number };
+  scaleHandleScreen: { x: number; y: number };
+  rotateHandleScreen: { x: number; y: number };
+  gizmoRadius: number;
   closed: boolean;
 }
 
@@ -154,6 +165,19 @@ function distancePointToSegment(
   return Math.hypot(dx, dy);
 }
 
+function pointInPolygon(px: number, py: number, polygon: Array<{ x: number; y: number }>): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x;
+    const yi = polygon[i].y;
+    const xj = polygon[j].x;
+    const yj = polygon[j].y;
+    const intersects = yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / Math.max(1e-6, yj - yi) + xi;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
 function maskPointsAreNormalized(points: MaskPoint[]): boolean {
   return points.every(
     (p) =>
@@ -202,6 +226,50 @@ function safeScale(value: number): number {
   return value;
 }
 
+function transformMaskPoints(
+  points: MaskPoint[],
+  centerX: number,
+  centerY: number,
+  options: {
+    translateX?: number;
+    translateY?: number;
+    scale?: number;
+    rotateRad?: number;
+  },
+): MaskPoint[] {
+  const translateX = options.translateX ?? 0;
+  const translateY = options.translateY ?? 0;
+  const scale = options.scale ?? 1;
+  const rotateRad = options.rotateRad ?? 0;
+  const cos = Math.cos(rotateRad);
+  const sin = Math.sin(rotateRad);
+
+  const mapCoord = (x: number, y: number): { x: number; y: number } => {
+    const localX = (x - centerX) * scale;
+    const localY = (y - centerY) * scale;
+    const rotX = localX * cos - localY * sin;
+    const rotY = localX * sin + localY * cos;
+    return {
+      x: centerX + rotX + translateX,
+      y: centerY + rotY + translateY,
+    };
+  };
+
+  return points.map((pt) => {
+    const p = mapCoord(pt.x, pt.y);
+    const inP = mapCoord(pt.inX, pt.inY);
+    const outP = mapCoord(pt.outX, pt.outY);
+    return {
+      x: p.x,
+      y: p.y,
+      inX: inP.x,
+      inY: inP.y,
+      outX: outP.x,
+      outY: outP.y,
+    };
+  });
+}
+
 function blendModeToComposite(mode: TimelineClipData['blendMode']): GlobalCompositeOperation {
   switch (mode) {
     case 'multiply':
@@ -234,25 +302,6 @@ function resolveGeneratorColor(clip: TimelineClipData): string | null {
   return null;
 }
 
-function applyEasingFactor(
-  t: number,
-  easing: NonNullable<TimelineClipData['keyframes']>[number]['easing'],
-): number {
-  const clamped = Math.max(0, Math.min(1, t));
-  switch (easing) {
-    case 'ease-in':
-      return clamped * clamped;
-    case 'ease-out':
-      return 1 - (1 - clamped) * (1 - clamped);
-    case 'ease-in-out':
-      return clamped < 0.5 ? 2 * clamped * clamped : 1 - 2 * (1 - clamped) * (1 - clamped);
-    case 'bezier':
-    case 'linear':
-    default:
-      return clamped;
-  }
-}
-
 function evaluateClipNumericKeyframe(
   clip: TimelineClipData,
   property: 'mask.opacity' | 'mask.feather' | 'mask.expansion',
@@ -274,7 +323,7 @@ function evaluateClipNumericKeyframe(
     if (clipLocalFrame < from.frame || clipLocalFrame > to.frame) continue;
     const span = Math.max(1, to.frame - from.frame);
     const t = (clipLocalFrame - from.frame) / span;
-    const eased = applyEasingFactor(t, from.easing);
+    const eased = applyKeyframeEasing(t, from.easing, from.bezierHandles);
     return from.value + (to.value - from.value) * eased;
   }
   return defaultValue;
@@ -539,6 +588,7 @@ export function ProgramMonitor() {
   const dragRef = useRef<{
     mode: 'move' | 'scale';
     clipId: string;
+    clipLocalFrame: number;
     startX: number;
     startY: number;
     posX: number;
@@ -549,11 +599,21 @@ export function ProgramMonitor() {
 
   const maskOverlayRef = useRef<MaskOverlayInfo | null>(null);
   const maskDragRef = useRef<{
+    mode: 'point' | 'shape' | 'shape-scale' | 'shape-rotate';
     clipId: string;
     maskId: string;
     keyframeId: string;
     frame: number;
     pointIndex: number;
+    startMaskX: number;
+    startMaskY: number;
+    centerMaskX: number;
+    centerMaskY: number;
+    centerScreenX: number;
+    centerScreenY: number;
+    startScreenDistance: number;
+    startScreenAngle: number;
+    basePoints: MaskPoint[];
     points: MaskPoint[];
     normalized: boolean;
     geometry: LayerGeometry;
@@ -574,6 +634,7 @@ export function ProgramMonitor() {
   } | null>(null);
 
   const [maskEditMode, setMaskEditMode] = useState(false);
+  const [maskOnionSkinEnabled, setMaskOnionSkinEnabled] = useState(true);
   const [activeMaskId, setActiveMaskId] = useState<string | null>(null);
   const [selectedMaskPoint, setSelectedMaskPoint] = useState<{
     clipId: string;
@@ -600,6 +661,7 @@ export function ProgramMonitor() {
 
   const sequences = useProjectStore((s) => s.sequences);
   const updateClipProperties = useProjectStore((s) => s.updateClipProperties);
+  const upsertClipKeyframe = useProjectStore((s) => s.upsertClipKeyframe);
   const addClipMask = useProjectStore((s) => s.addClipMask);
   const upsertMaskShapeKeyframe = useProjectStore((s) => s.upsertMaskShapeKeyframe);
   const liftRangeByInOut = useProjectStore((s) => s.liftRangeByInOut);
@@ -608,6 +670,8 @@ export function ProgramMonitor() {
   const targetVideoTrackId = useSelectionStore((s) => s.targetVideoTrackId);
   const targetAudioTrackId = useSelectionStore((s) => s.targetAudioTrackId);
   const linkedSelection = useSelectionStore((s) => s.linkedSelection);
+  const autoKeyframeEnabled = useSelectionStore((s) => s.autoKeyframeEnabled);
+  const setAutoKeyframeEnabled = useSelectionStore((s) => s.setAutoKeyframeEnabled);
   const selectClip = useSelectionStore((s) => s.selectClip);
   const setActivePanel = useSelectionStore((s) => s.setActivePanel);
 
@@ -1141,6 +1205,76 @@ export function ProgramMonitor() {
     if (maskEditMode && !isPlaying && controlledLayer && activeMask) {
       const geometry = getLayerGeometry(controlledLayer);
       if (geometry) {
+        const drawOnionShape = (
+          shapePoints: MaskPoint[],
+          strokeStyle: string,
+          alpha: number,
+          dash: number[],
+        ) => {
+          if (shapePoints.length < 2) return;
+          const normalizedShape = maskPointsAreNormalized(shapePoints);
+          const screen = shapePoints.map((p) => mapMaskPointToCanvas(p, geometry, normalizedShape));
+          const screenInShape = shapePoints.map((p) =>
+            mapMaskPointToCanvas(
+              { x: p.inX, y: p.inY, inX: p.inX, inY: p.inY, outX: p.outX, outY: p.outY },
+              geometry,
+              normalizedShape,
+            ),
+          );
+          const screenOutShape = shapePoints.map((p) =>
+            mapMaskPointToCanvas(
+              { x: p.outX, y: p.outY, inX: p.inX, inY: p.inY, outX: p.outX, outY: p.outY },
+              geometry,
+              normalizedShape,
+            ),
+          );
+          ctx.save();
+          ctx.globalAlpha = alpha;
+          ctx.strokeStyle = strokeStyle;
+          ctx.lineWidth = 1;
+          ctx.setLineDash(dash);
+          ctx.beginPath();
+          ctx.moveTo(screen[0].x, screen[0].y);
+          for (let i = 1; i < screen.length; i++) {
+            const prev = i - 1;
+            ctx.bezierCurveTo(
+              screenOutShape[prev].x,
+              screenOutShape[prev].y,
+              screenInShape[i].x,
+              screenInShape[i].y,
+              screen[i].x,
+              screen[i].y,
+            );
+          }
+          if (activeMask.closed) {
+            const last = screen.length - 1;
+            ctx.bezierCurveTo(
+              screenOutShape[last].x,
+              screenOutShape[last].y,
+              screenInShape[0].x,
+              screenInShape[0].y,
+              screen[0].x,
+              screen[0].y,
+            );
+            ctx.closePath();
+          }
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        if (maskOnionSkinEnabled) {
+          const sortedMaskKeyframes = [...(activeMask.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
+          const localFrame = controlledLayer.clipLocalFrame;
+          const prevKeyframe = [...sortedMaskKeyframes].reverse().find((kf) => kf.frame < localFrame) ?? null;
+          const nextKeyframe = sortedMaskKeyframes.find((kf) => kf.frame > localFrame) ?? null;
+          if (prevKeyframe) {
+            drawOnionShape(prevKeyframe.points, '#38bdf8', 0.45, [3, 4]);
+          }
+          if (nextKeyframe) {
+            drawOnionShape(nextKeyframe.points, '#f59e0b', 0.45, [3, 4]);
+          }
+        }
+
         const preview = maskPreviewRef.current;
         const hasPreview =
           preview &&
@@ -1214,6 +1348,65 @@ export function ProgramMonitor() {
             ctx.strokeStyle = '#082f49';
             ctx.stroke();
           }
+
+          const centerMask = points.reduce(
+            (acc, pt) => ({ x: acc.x + pt.x, y: acc.y + pt.y }),
+            { x: 0, y: 0 },
+          );
+          centerMask.x /= Math.max(1, points.length);
+          centerMask.y /= Math.max(1, points.length);
+          const centerScreen = screenPoints.reduce(
+            (acc, pt) => ({ x: acc.x + pt.x, y: acc.y + pt.y }),
+            { x: 0, y: 0 },
+          );
+          centerScreen.x /= Math.max(1, screenPoints.length);
+          centerScreen.y /= Math.max(1, screenPoints.length);
+          const boundsRadius = screenPoints.reduce((max, pt) => {
+            const d = Math.hypot(pt.x - centerScreen.x, pt.y - centerScreen.y);
+            return Math.max(max, d);
+          }, 0);
+          const gizmoRadius = Math.max(30, boundsRadius + 16);
+          const scaleHandleScreen = {
+            x: centerScreen.x + gizmoRadius,
+            y: centerScreen.y,
+          };
+          const rotateHandleScreen = {
+            x: centerScreen.x,
+            y: centerScreen.y - gizmoRadius,
+          };
+
+          ctx.setLineDash([3, 3]);
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(centerScreen.x, centerScreen.y);
+          ctx.lineTo(scaleHandleScreen.x, scaleHandleScreen.y);
+          ctx.moveTo(centerScreen.x, centerScreen.y);
+          ctx.lineTo(rotateHandleScreen.x, rotateHandleScreen.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.beginPath();
+          ctx.fillStyle = '#0f172a';
+          ctx.arc(centerScreen.x, centerScreen.y, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = '#67e8f9';
+          ctx.stroke();
+
+          ctx.fillStyle = '#22d3ee';
+          ctx.fillRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
+          ctx.strokeStyle = '#082f49';
+          ctx.strokeRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
+
+          ctx.beginPath();
+          ctx.fillStyle = '#f59e0b';
+          ctx.arc(rotateHandleScreen.x, rotateHandleScreen.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = '#1c1917';
+          ctx.stroke();
+
           ctx.restore();
 
           maskOverlayRef.current = {
@@ -1224,6 +1417,11 @@ export function ProgramMonitor() {
             normalized,
             geometry,
             screenPoints,
+            centerMask,
+            centerScreen,
+            scaleHandleScreen,
+            rotateHandleScreen,
+            gizmoRadius,
             closed: activeMask.closed,
           };
         }
@@ -1235,6 +1433,7 @@ export function ProgramMonitor() {
     activeLayers,
     activeMask,
     maskEditMode,
+    maskOnionSkinEnabled,
     isPlaying,
     shuttleSpeed,
     getOrCreateVideo,
@@ -1267,17 +1466,47 @@ export function ProgramMonitor() {
           maskDrag.geometry,
           maskDrag.normalized,
         );
-        const nextPoints = maskDrag.points.map((pt, idx) => {
-          if (idx !== maskDrag.pointIndex) return pt;
-          return {
-            x: mapped.x,
-            y: mapped.y,
-            inX: mapped.x,
-            inY: mapped.y,
-            outX: mapped.x,
-            outY: mapped.y,
-          };
-        });
+        let nextPoints: MaskPoint[] = [];
+        if (maskDrag.mode === 'point') {
+          const dx = mapped.x - maskDrag.startMaskX;
+          const dy = mapped.y - maskDrag.startMaskY;
+          nextPoints = maskDrag.basePoints.map((pt, idx) => {
+            if (idx !== maskDrag.pointIndex) return pt;
+            return {
+              x: maskDrag.startMaskX + dx,
+              y: maskDrag.startMaskY + dy,
+              inX: pt.inX + dx,
+              inY: pt.inY + dy,
+              outX: pt.outX + dx,
+              outY: pt.outY + dy,
+            };
+          });
+        } else if (maskDrag.mode === 'shape') {
+          const dx = mapped.x - maskDrag.startMaskX;
+          const dy = mapped.y - maskDrag.startMaskY;
+          nextPoints = transformMaskPoints(maskDrag.basePoints, maskDrag.centerMaskX, maskDrag.centerMaskY, {
+            translateX: dx,
+            translateY: dy,
+          });
+        } else if (maskDrag.mode === 'shape-scale') {
+          const currentDistance = Math.hypot(
+            p.x - maskDrag.centerScreenX,
+            p.y - maskDrag.centerScreenY,
+          );
+          const factor = currentDistance / Math.max(1, maskDrag.startScreenDistance);
+          nextPoints = transformMaskPoints(maskDrag.basePoints, maskDrag.centerMaskX, maskDrag.centerMaskY, {
+            scale: Math.max(0.05, Math.min(20, factor)),
+          });
+        } else {
+          const currentAngle = Math.atan2(
+            p.y - maskDrag.centerScreenY,
+            p.x - maskDrag.centerScreenX,
+          );
+          const deltaAngle = currentAngle - maskDrag.startScreenAngle;
+          nextPoints = transformMaskPoints(maskDrag.basePoints, maskDrag.centerMaskX, maskDrag.centerMaskY, {
+            rotateRad: deltaAngle,
+          });
+        }
         maskDrag.points = nextPoints;
         maskPreviewRef.current = {
           clipId: maskDrag.clipId,
@@ -1323,11 +1552,13 @@ export function ProgramMonitor() {
           frame: maskDrag.frame,
           points: maskDrag.points.map((pt) => ({ ...pt })),
         });
-        setSelectedMaskPoint({
-          clipId: maskDrag.clipId,
-          maskId: maskDrag.maskId,
-          pointIndex: maskDrag.pointIndex,
-        });
+        if (maskDrag.mode === 'point' && maskDrag.pointIndex >= 0) {
+          setSelectedMaskPoint({
+            clipId: maskDrag.clipId,
+            maskId: maskDrag.maskId,
+            pointIndex: maskDrag.pointIndex,
+          });
+        }
         maskDragRef.current = null;
         maskPreviewRef.current = null;
         setRenderTick((v) => v + 1);
@@ -1343,6 +1574,52 @@ export function ProgramMonitor() {
           scaleX: preview.scaleX,
           scaleY: preview.scaleY,
         });
+
+        if (autoKeyframeEnabled) {
+          const clip = activeLayers.find((layer) => layer.clip.id === drag.clipId)?.clip ?? null;
+          const localFrame = Math.max(0, Math.round(drag.clipLocalFrame));
+          const existing = clip?.keyframes ?? [];
+          const getExistingId = (property: TimelineKeyframeData['property']): string | null =>
+            existing.find((kf) => kf.property === property && kf.frame === localFrame)?.id ?? null;
+          const makeId = (property: TimelineKeyframeData['property']): string =>
+            getExistingId(property) ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+
+          const maybeUpsert = (
+            property: TimelineKeyframeData['property'],
+            value: number,
+            previous: number,
+          ): void => {
+            if (Math.abs(value - previous) < 0.0001) return;
+            void upsertClipKeyframe(drag.clipId, {
+              id: makeId(property),
+              property,
+              frame: localFrame,
+              value,
+              easing: 'linear',
+            });
+          };
+
+          maybeUpsert(
+            'transform.positionX',
+            preview.positionX,
+            drag.posX,
+          );
+          maybeUpsert(
+            'transform.positionY',
+            preview.positionY,
+            drag.posY,
+          );
+          maybeUpsert(
+            'transform.scaleX',
+            preview.scaleX,
+            drag.scaleX,
+          );
+          maybeUpsert(
+            'transform.scaleY',
+            preview.scaleY,
+            drag.scaleY,
+          );
+        }
       }
       dragRef.current = null;
       transformPreviewRef.current = null;
@@ -1355,7 +1632,14 @@ export function ProgramMonitor() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [upsertMaskShapeKeyframe, updateClipProperties, zoom]);
+  }, [
+    activeLayers,
+    autoKeyframeEnabled,
+    upsertClipKeyframe,
+    upsertMaskShapeKeyframe,
+    updateClipProperties,
+    zoom,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1502,6 +1786,91 @@ export function ProgramMonitor() {
         const canvas = canvasRef.current;
         if (overlay && canvas) {
           const p = clientToCanvasPoint(canvas, e.clientX, e.clientY);
+          const mapped = mapCanvasToMaskPoint(
+            p.x,
+            p.y,
+            overlay.geometry,
+            overlay.normalized,
+          );
+          const exactMask = controlledLayer?.clip.masks?.find((m) => m.id === overlay.maskId) ?? null;
+          const existingKeyframeId =
+            exactMask?.keyframes.find((kf) => kf.frame === overlay.frame)?.id ?? null;
+          const keyframeId =
+            existingKeyframeId ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+          const basePoints = overlay.points.map((pt) => ({ ...pt }));
+
+          const scaleHandleDistance = Math.hypot(
+            overlay.scaleHandleScreen.x - p.x,
+            overlay.scaleHandleScreen.y - p.y,
+          );
+          if (scaleHandleDistance <= 10) {
+            maskDragRef.current = {
+              mode: 'shape-scale',
+              clipId: overlay.clipId,
+              maskId: overlay.maskId,
+              keyframeId,
+              frame: overlay.frame,
+              pointIndex: -1,
+              startMaskX: mapped.x,
+              startMaskY: mapped.y,
+              centerMaskX: overlay.centerMask.x,
+              centerMaskY: overlay.centerMask.y,
+              centerScreenX: overlay.centerScreen.x,
+              centerScreenY: overlay.centerScreen.y,
+              startScreenDistance: Math.max(
+                1,
+                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+              ),
+              startScreenAngle: Math.atan2(
+                p.y - overlay.centerScreen.y,
+                p.x - overlay.centerScreen.x,
+              ),
+              basePoints: basePoints.map((pt) => ({ ...pt })),
+              points: basePoints.map((pt) => ({ ...pt })),
+              normalized: overlay.normalized,
+              geometry: overlay.geometry,
+            };
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+
+          const rotateHandleDistance = Math.hypot(
+            overlay.rotateHandleScreen.x - p.x,
+            overlay.rotateHandleScreen.y - p.y,
+          );
+          if (rotateHandleDistance <= 10) {
+            maskDragRef.current = {
+              mode: 'shape-rotate',
+              clipId: overlay.clipId,
+              maskId: overlay.maskId,
+              keyframeId,
+              frame: overlay.frame,
+              pointIndex: -1,
+              startMaskX: mapped.x,
+              startMaskY: mapped.y,
+              centerMaskX: overlay.centerMask.x,
+              centerMaskY: overlay.centerMask.y,
+              centerScreenX: overlay.centerScreen.x,
+              centerScreenY: overlay.centerScreen.y,
+              startScreenDistance: Math.max(
+                1,
+                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+              ),
+              startScreenAngle: Math.atan2(
+                p.y - overlay.centerScreen.y,
+                p.x - overlay.centerScreen.x,
+              ),
+              basePoints: basePoints.map((pt) => ({ ...pt })),
+              points: basePoints.map((pt) => ({ ...pt })),
+              normalized: overlay.normalized,
+              geometry: overlay.geometry,
+            };
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+
           const pointThreshold = 12;
           let hitPointIdx = -1;
           let hitDist = Number.POSITIVE_INFINITY;
@@ -1515,18 +1884,30 @@ export function ProgramMonitor() {
           }
 
           if (hitPointIdx >= 0) {
-            const exactMask = controlledLayer?.clip.masks?.find((m) => m.id === overlay.maskId) ?? null;
-            const existingKeyframeId =
-              exactMask?.keyframes.find((kf) => kf.frame === overlay.frame)?.id ?? null;
-            const keyframeId =
-              existingKeyframeId ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+            const hitPoint = overlay.points[hitPointIdx];
             maskDragRef.current = {
+              mode: 'point',
               clipId: overlay.clipId,
               maskId: overlay.maskId,
               keyframeId,
               frame: overlay.frame,
               pointIndex: hitPointIdx,
-              points: overlay.points.map((pt) => ({ ...pt })),
+              startMaskX: hitPoint?.x ?? 0,
+              startMaskY: hitPoint?.y ?? 0,
+              centerMaskX: overlay.centerMask.x,
+              centerMaskY: overlay.centerMask.y,
+              centerScreenX: overlay.centerScreen.x,
+              centerScreenY: overlay.centerScreen.y,
+              startScreenDistance: Math.max(
+                1,
+                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+              ),
+              startScreenAngle: Math.atan2(
+                p.y - overlay.centerScreen.y,
+                p.x - overlay.centerScreen.x,
+              ),
+              basePoints: basePoints.map((pt) => ({ ...pt })),
+              points: basePoints.map((pt) => ({ ...pt })),
               normalized: overlay.normalized,
               geometry: overlay.geometry,
             };
@@ -1541,12 +1922,6 @@ export function ProgramMonitor() {
           }
 
           if (e.shiftKey && overlay.points.length >= 2) {
-            const mapped = mapCanvasToMaskPoint(
-              p.x,
-              p.y,
-              overlay.geometry,
-              overlay.normalized,
-            );
             const points = overlay.points.map((pt) => ({ ...pt }));
             let bestSegIndex = 0;
             let bestSegDist = Number.POSITIVE_INFINITY;
@@ -1589,6 +1964,38 @@ export function ProgramMonitor() {
             e.stopPropagation();
             return;
           }
+
+          if (overlay.closed && pointInPolygon(p.x, p.y, overlay.screenPoints)) {
+            maskDragRef.current = {
+              mode: 'shape',
+              clipId: overlay.clipId,
+              maskId: overlay.maskId,
+              keyframeId,
+              frame: overlay.frame,
+              pointIndex: -1,
+              startMaskX: mapped.x,
+              startMaskY: mapped.y,
+              centerMaskX: overlay.centerMask.x,
+              centerMaskY: overlay.centerMask.y,
+              centerScreenX: overlay.centerScreen.x,
+              centerScreenY: overlay.centerScreen.y,
+              startScreenDistance: Math.max(
+                1,
+                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+              ),
+              startScreenAngle: Math.atan2(
+                p.y - overlay.centerScreen.y,
+                p.x - overlay.centerScreen.x,
+              ),
+              basePoints: basePoints.map((pt) => ({ ...pt })),
+              points: basePoints.map((pt) => ({ ...pt })),
+              normalized: overlay.normalized,
+              geometry: overlay.geometry,
+            };
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
         }
       }
 
@@ -1622,6 +2029,7 @@ export function ProgramMonitor() {
       dragRef.current = {
         mode,
         clipId: target.layer.clip.id,
+        clipLocalFrame: target.layer.clipLocalFrame,
         startX: e.clientX,
         startY: e.clientY,
         posX: target.layer.clip.positionX ?? 0,
@@ -1713,6 +2121,12 @@ export function ProgramMonitor() {
 
         <div className="absolute right-2 top-2 flex items-center gap-1">
           <TBtn
+            label={autoKeyframeEnabled ? 'AutoKey On' : 'AutoKey'}
+            title="Toggle automatic keyframe creation while dragging transform controls"
+            className={autoKeyframeEnabled ? 'bg-emerald-700/80 text-white' : ''}
+            onClick={() => setAutoKeyframeEnabled(!autoKeyframeEnabled)}
+          />
+          <TBtn
             label={maskEditMode ? 'Mask On' : 'Mask'}
             title="Toggle mask point editing mode"
             className={maskEditMode ? 'bg-cyan-700/80 text-white' : ''}
@@ -1721,6 +2135,12 @@ export function ProgramMonitor() {
               maskDragRef.current = null;
               maskPreviewRef.current = null;
             }}
+          />
+          <TBtn
+            label={maskOnionSkinEnabled ? 'Onion On' : 'Onion'}
+            title="Toggle onion skin for previous/next mask keyframes"
+            className={maskOnionSkinEnabled ? 'bg-sky-700/70 text-white' : ''}
+            onClick={() => setMaskOnionSkinEnabled((v) => !v)}
           />
           <TBtn
             label="+Mask"
@@ -1748,16 +2168,16 @@ export function ProgramMonitor() {
         </div>
 
         <div className="absolute bottom-2 left-1/2 flex -translate-x-1/2 items-center gap-0.5">
-          <TBtn label="⏮" title="Go to start" onClick={goToStart} />
-          <TBtn label="◀" title="Step back" onClick={stepBackward} />
+          <TBtn label="|<" title="Go to start" onClick={goToStart} />
+          <TBtn label="<" title="Step back" onClick={stepBackward} />
           <TBtn
-            label={isPlaying ? '⏸' : '▶'}
+            label={isPlaying ? 'Pause' : 'Play'}
             title="Play / Pause (Space)"
             className="bg-zinc-700 px-3"
             onClick={togglePlayPause}
           />
-          <TBtn label="▶" title="Step forward" onClick={stepForward} />
-          <TBtn label="⏭" title="Go to end" onClick={goToEnd} />
+          <TBtn label=">" title="Step forward" onClick={stepForward} />
+          <TBtn label=">|" title="Go to end" onClick={goToEnd} />
           <TBtn label="I" title="Set In" onClick={() => setInPointAt(currentFrame)} />
           <TBtn label="O" title="Set Out" onClick={() => setOutPointAt(currentFrame)} />
           <TBtn label="Clr" title="Clear In/Out" onClick={clearInOutPoints} />
@@ -1871,7 +2291,7 @@ export function ProgramMonitor() {
           />
           <span className="text-[10px] text-zinc-500">
             {maskEditMode
-              ? 'Mask mode: drag points, Shift+Click edge to add, Delete to remove'
+              ? 'Mask mode: drag points, drag inside closed mask to move shape, drag cyan square/orange circle for scale/rotate, Shift+Click edge to add, Delete to remove, Onion shows prev/next'
               : 'Drag clip in viewer to move, corner to resize'}
           </span>
         </div>

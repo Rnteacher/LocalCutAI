@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
+import { applyKeyframeEasing } from '../lib/keyframeEasing.js';
 import type {
   TimelineClipData,
   TimelineTrackData,
@@ -76,6 +77,15 @@ type KeyframeProperty = NonNullable<TimelineClipData['keyframes']>[number]['prop
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function defaultBezierHandles(): { inX: number; inY: number; outX: number; outY: number } {
+  return {
+    outX: 0.25,
+    outY: 0.1,
+    inX: 0.75,
+    inY: 0.9,
+  };
 }
 
 function keyframeValueBounds(property: KeyframeProperty, values: number[]): { min: number; max: number } {
@@ -307,11 +317,31 @@ function KeyframeMiniGraph({
   clipDuration: number;
   property: KeyframeProperty;
   currentFrame: number;
-  onCommit: (keyframeId: string, frame: number, value: number) => void;
+  onCommit: (
+    keyframeId: string,
+    patch: Partial<
+      Pick<
+        NonNullable<TimelineClipData['keyframes']>[number],
+        'frame' | 'value' | 'bezierHandles'
+      >
+    >,
+  ) => void;
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [draftById, setDraftById] = useState<Record<string, { frame: number; value: number }>>({});
-  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [draftById, setDraftById] = useState<
+    Record<
+      string,
+      {
+        frame: number;
+        value: number;
+        bezierHandles?: { inX: number; inY: number; outX: number; outY: number };
+      }
+    >
+  >({});
+  const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
+  const [draggingHandle, setDraggingHandle] = useState<{ keyframeId: string; handle: 'in' | 'out' } | null>(
+    null,
+  );
 
   useEffect(() => {
     setDraftById({});
@@ -337,13 +367,43 @@ function KeyframeMiniGraph({
     effective.map((k) => k.value),
   );
   const span = Math.max(0.0001, bounds.max - bounds.min);
-  const points = effective
-    .map((k) => {
-      const x = ((Math.max(0, k.frame) / Math.max(1, clipDuration)) * 100).toFixed(2);
-      const y = (100 - (((k.value - bounds.min) / span) * 100)).toFixed(2);
-      return `${x},${y}`;
-    })
-    .join(' ');
+  const toX = (frame: number): number =>
+    (Math.max(0, frame) / Math.max(1, clipDuration)) * 100;
+  const toY = (value: number): number =>
+    100 - ((value - bounds.min) / span) * 100;
+
+  const curvePath = useMemo(() => {
+    if (effective.length === 0) return '';
+    if (effective.length === 1) {
+      const x = toX(effective[0].frame);
+      const y = toY(effective[0].value);
+      return `M ${x.toFixed(3)} ${y.toFixed(3)}`;
+    }
+
+    let d = '';
+    for (let i = 0; i < effective.length - 1; i++) {
+      const from = effective[i];
+      const to = effective[i + 1];
+      const x0 = toX(from.frame);
+      const y0 = toY(from.value);
+      if (i === 0) d += `M ${x0.toFixed(3)} ${y0.toFixed(3)}`;
+
+      const spanFrames = Math.max(1, to.frame - from.frame);
+      const steps = Math.max(8, Math.min(56, Math.round(spanFrames / Math.max(1, clipDuration) * 180)));
+      for (let step = 1; step <= steps; step++) {
+        const t = step / steps;
+        const eased = applyKeyframeEasing(
+          t,
+          from.easing,
+          from.bezierHandles,
+        );
+        const frame = from.frame + spanFrames * t;
+        const value = from.value + (to.value - from.value) * eased;
+        d += ` L ${toX(frame).toFixed(3)} ${toY(value).toFixed(3)}`;
+      }
+    }
+    return d;
+  }, [effective, clipDuration, span, bounds.min]);
   const currentX = (Math.max(0, Math.min(clipDuration, currentFrame)) / Math.max(1, clipDuration)) * 100;
 
   const updateFromPointer = useCallback(
@@ -360,20 +420,92 @@ function KeyframeMiniGraph({
     [bounds.max, bounds.min, clipDuration],
   );
 
+  const updateHandleFromPointer = useCallback(
+    (keyframeId: string, handle: 'in' | 'out', clientX: number, clientY: number) => {
+      const svg = svgRef.current;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      const px = clamp01((clientX - rect.left) / Math.max(1, rect.width)) * 100;
+      const py = clamp01((clientY - rect.top) / Math.max(1, rect.height)) * 100;
+      const index = effective.findIndex((kf) => kf.id === keyframeId);
+      if (index < 0) return;
+      const current = effective[index];
+      const existingHandles = current.bezierHandles ?? defaultBezierHandles();
+
+      if (handle === 'out') {
+        const next = effective[index + 1];
+        if (!next) return;
+        const x0 = toX(current.frame);
+        const y0 = toY(current.value);
+        const x1 = toX(next.frame);
+        const y1 = toY(next.value);
+        const dx = Math.abs(x1 - x0) < 1e-4 ? 1 : x1 - x0;
+        const dy = Math.abs(y1 - y0) < 1e-4 ? 1 : y1 - y0;
+        const outX = clamp01((px - x0) / dx);
+        const outY = clamp01((py - y0) / dy);
+        setDraftById((prev) => ({
+          ...prev,
+          [keyframeId]: {
+            frame: current.frame,
+            value: current.value,
+            bezierHandles: { ...existingHandles, outX, outY },
+          },
+        }));
+        return;
+      }
+
+      const prevKeyframe = effective[index - 1];
+      if (!prevKeyframe) return;
+      const x0 = toX(prevKeyframe.frame);
+      const y0 = toY(prevKeyframe.value);
+      const x1 = toX(current.frame);
+      const y1 = toY(current.value);
+      const dx = Math.abs(x1 - x0) < 1e-4 ? 1 : x1 - x0;
+      const dy = Math.abs(y1 - y0) < 1e-4 ? 1 : y1 - y0;
+      const inX = clamp01((px - x0) / dx);
+      const inY = clamp01((py - y0) / dy);
+      setDraftById((prev) => ({
+        ...prev,
+        [keyframeId]: {
+          frame: current.frame,
+          value: current.value,
+          bezierHandles: { ...existingHandles, inX, inY },
+        },
+      }));
+    },
+    [effective, toX, toY],
+  );
+
   useEffect(() => {
-    if (!draggingId) return;
+    if (!draggingPointId && !draggingHandle) return;
     const onMove = (e: MouseEvent) => {
-      updateFromPointer(draggingId, e.clientX, e.clientY);
+      if (draggingPointId) {
+        updateFromPointer(draggingPointId, e.clientX, e.clientY);
+        return;
+      }
+      if (draggingHandle) {
+        updateHandleFromPointer(draggingHandle.keyframeId, draggingHandle.handle, e.clientX, e.clientY);
+      }
     };
     const onUp = () => {
-      const draft = draftById[draggingId];
-      if (draft) {
-        onCommit(draggingId, draft.frame, draft.value);
+      if (draggingPointId) {
+        const draft = draftById[draggingPointId];
+        if (draft) {
+          onCommit(draggingPointId, { frame: draft.frame, value: draft.value });
+        }
       }
-      setDraggingId(null);
+      if (draggingHandle) {
+        const draft = draftById[draggingHandle.keyframeId];
+        if (draft?.bezierHandles) {
+          onCommit(draggingHandle.keyframeId, { bezierHandles: draft.bezierHandles });
+        }
+      }
+      setDraggingPointId(null);
+      setDraggingHandle(null);
       setDraftById((prev) => {
         const next = { ...prev };
-        delete next[draggingId];
+        if (draggingPointId) delete next[draggingPointId];
+        if (draggingHandle) delete next[draggingHandle.keyframeId];
         return next;
       });
     };
@@ -383,30 +515,86 @@ function KeyframeMiniGraph({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [draggingId, draftById, onCommit, updateFromPointer]);
+  }, [draggingPointId, draggingHandle, draftById, onCommit, updateFromPointer, updateHandleFromPointer]);
 
   return (
     <svg
       ref={svgRef}
       viewBox="0 0 100 100"
-      className="h-24 w-full rounded border border-zinc-700 bg-zinc-900/50"
+      className="h-28 w-full rounded border border-zinc-700 bg-zinc-900/50"
     >
       <line x1={currentX} y1={0} x2={currentX} y2={100} stroke="#334155" strokeWidth="0.8" />
-      <polyline fill="none" stroke="#60a5fa" strokeWidth="1.6" points={points} />
+      <path fill="none" stroke="#60a5fa" strokeWidth="1.6" d={curvePath} />
+      {effective.map((k, index) => {
+        if (k.easing !== 'bezier') return null;
+        const handles = k.bezierHandles ?? defaultBezierHandles();
+        const x = toX(k.frame);
+        const y = toY(k.value);
+        const prev = index > 0 ? effective[index - 1] : null;
+        const next = index < effective.length - 1 ? effective[index + 1] : null;
+        const prevX = prev ? toX(prev.frame) : null;
+        const prevY = prev ? toY(prev.value) : null;
+        const nextX = next ? toX(next.frame) : null;
+        const nextY = next ? toY(next.value) : null;
+        const inHX = prevX == null ? null : prevX + (x - prevX) * clamp01(handles.inX);
+        const inHY = prevY == null ? null : prevY + (y - prevY) * clamp01(handles.inY);
+        const outHX = nextX == null ? null : x + (nextX - x) * clamp01(handles.outX);
+        const outHY = nextY == null ? null : y + (nextY - y) * clamp01(handles.outY);
+        return (
+          <g key={`handle-${k.id}`}>
+            {inHX != null && inHY != null && (
+              <>
+                <line x1={x} y1={y} x2={inHX} y2={inHY} stroke="#64748b" strokeWidth="0.8" />
+                <circle
+                  cx={inHX}
+                  cy={inHY}
+                  r="1.8"
+                  fill="#94a3b8"
+                  className="cursor-crosshair"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDraggingHandle({ keyframeId: k.id, handle: 'in' });
+                    updateHandleFromPointer(k.id, 'in', e.clientX, e.clientY);
+                  }}
+                />
+              </>
+            )}
+            {outHX != null && outHY != null && (
+              <>
+                <line x1={x} y1={y} x2={outHX} y2={outHY} stroke="#64748b" strokeWidth="0.8" />
+                <circle
+                  cx={outHX}
+                  cy={outHY}
+                  r="1.8"
+                  fill="#94a3b8"
+                  className="cursor-crosshair"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDraggingHandle({ keyframeId: k.id, handle: 'out' });
+                    updateHandleFromPointer(k.id, 'out', e.clientX, e.clientY);
+                  }}
+                />
+              </>
+            )}
+          </g>
+        );
+      })}
       {effective.map((k) => {
-        const x = (Math.max(0, k.frame) / Math.max(1, clipDuration)) * 100;
-        const y = 100 - ((k.value - bounds.min) / span) * 100;
+        const x = toX(k.frame);
+        const y = toY(k.value);
         return (
           <circle
             key={k.id}
             cx={x}
             cy={y}
             r="2.6"
-            fill={draggingId === k.id ? '#bfdbfe' : '#93c5fd'}
+            fill={draggingPointId === k.id ? '#bfdbfe' : '#93c5fd'}
             className="cursor-pointer"
             onMouseDown={(e) => {
               e.preventDefault();
-              setDraggingId(k.id);
+              setDraggingPointId(k.id);
               updateFromPointer(k.id, e.clientX, e.clientY);
             }}
           />
@@ -420,6 +608,8 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const setActivePanel = useSelectionStore((s) => s.setActivePanel);
   const activePanel = useSelectionStore((s) => s.activePanel);
   const selectedClipIds = useSelectionStore((s) => s.selectedClipIds);
+  const autoKeyframeEnabled = useSelectionStore((s) => s.autoKeyframeEnabled);
+  const setAutoKeyframeEnabled = useSelectionStore((s) => s.setAutoKeyframeEnabled);
   const sourceAsset = useSelectionStore((s) => s.sourceAsset);
   const sourceInTime = useSelectionStore((s) => s.sourceInTime);
   const sourceOutTime = useSelectionStore((s) => s.sourceOutTime);
@@ -451,6 +641,10 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const [selectedMaskId, setSelectedMaskId] = useState<string | null>(null);
   const [selectedMaskKeyframeId, setSelectedMaskKeyframeId] = useState<string | null>(null);
   const [selectedMaskPointIndex, setSelectedMaskPointIndex] = useState(0);
+  const [maskMoveX, setMaskMoveX] = useState(0);
+  const [maskMoveY, setMaskMoveY] = useState(0);
+  const [maskScalePct, setMaskScalePct] = useState(100);
+  const [maskRotateDeg, setMaskRotateDeg] = useState(0);
 
   const selectedClip: TimelineClipData | null = (() => {
     if (selectedClipIds.size !== 1) return null;
@@ -536,12 +730,49 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const widthPx = Math.round(baseWidth * Math.abs(scaleX));
   const heightPx = Math.round(baseHeight * Math.abs(scaleY));
 
+  const resolveAutoKeyProperty = useCallback(
+    (
+      key: keyof TimelineClipData,
+    ): NonNullable<TimelineClipData['keyframes']>[number]['property'] | null => {
+      if (key === 'positionX') return 'transform.positionX';
+      if (key === 'positionY') return 'transform.positionY';
+      if (key === 'scaleX') return 'transform.scaleX';
+      if (key === 'scaleY') return 'transform.scaleY';
+      if (key === 'rotation') return 'transform.rotation';
+      if (key === 'opacity') return 'opacity';
+      return null;
+    },
+    [],
+  );
+
+  const maybeAutoKeyframe = useCallback(
+    (clip: TimelineClipData, key: keyof TimelineClipData, value: number) => {
+      if (!autoKeyframeEnabled) return;
+      const property = resolveAutoKeyProperty(key);
+      if (!property) return;
+      const localFrame = Math.max(0, Math.min(clip.durationFrames, currentFrame - clip.startFrame));
+      const existing = (clip.keyframes ?? []).find(
+        (kf) => kf.property === property && kf.frame === localFrame,
+      );
+      void upsertClipKeyframe(clip.id, {
+        id: existing?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        property,
+        frame: localFrame,
+        value,
+        easing: existing?.easing ?? 'linear',
+        bezierHandles: existing?.bezierHandles,
+      });
+    },
+    [autoKeyframeEnabled, currentFrame, resolveAutoKeyProperty, upsertClipKeyframe],
+  );
+
   const updateProp = useCallback(
     (key: keyof TimelineClipData, value: number) => {
       if (!selectedClip) return;
       void updateClipProperties(selectedClip.id, { [key]: value });
+      maybeAutoKeyframe(selectedClip, key, value);
     },
-    [selectedClip, updateClipProperties],
+    [selectedClip, updateClipProperties, maybeAutoKeyframe],
   );
 
   const updateScaleX = useCallback(
@@ -550,15 +781,19 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       const next = clampScale(v);
       if (linkScale) {
         const sySign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
+        const nextY = clampScale(Math.abs(next) * sySign);
         void updateClipProperties(selectedClip.id, {
           scaleX: next,
-          scaleY: clampScale(Math.abs(next) * sySign),
+          scaleY: nextY,
         });
+        maybeAutoKeyframe(selectedClip, 'scaleX', next);
+        maybeAutoKeyframe(selectedClip, 'scaleY', nextY);
       } else {
         void updateClipProperties(selectedClip.id, { scaleX: next });
+        maybeAutoKeyframe(selectedClip, 'scaleX', next);
       }
     },
-    [selectedClip, linkScale, updateClipProperties],
+    [selectedClip, linkScale, updateClipProperties, maybeAutoKeyframe],
   );
 
   const updateScaleY = useCallback(
@@ -567,15 +802,19 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       const next = clampScale(v);
       if (linkScale) {
         const sxSign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
+        const nextX = clampScale(Math.abs(next) * sxSign);
         void updateClipProperties(selectedClip.id, {
-          scaleX: clampScale(Math.abs(next) * sxSign),
+          scaleX: nextX,
           scaleY: next,
         });
+        maybeAutoKeyframe(selectedClip, 'scaleX', nextX);
+        maybeAutoKeyframe(selectedClip, 'scaleY', next);
       } else {
         void updateClipProperties(selectedClip.id, { scaleY: next });
+        maybeAutoKeyframe(selectedClip, 'scaleY', next);
       }
     },
-    [selectedClip, linkScale, updateClipProperties],
+    [selectedClip, linkScale, updateClipProperties, maybeAutoKeyframe],
   );
 
   const fitToFrame = useCallback(() => {
@@ -586,13 +825,26 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     const fitY = seqResolution.height / Math.max(1, srcH);
     const sxSign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
     const sySign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
+    const nextScaleX = clampScale(fitX * sxSign);
+    const nextScaleY = clampScale(fitY * sySign);
     void updateClipProperties(selectedClip.id, {
-      scaleX: clampScale(fitX * sxSign),
-      scaleY: clampScale(fitY * sySign),
+      scaleX: nextScaleX,
+      scaleY: nextScaleY,
       positionX: 0,
       positionY: 0,
     });
-  }, [selectedClip, clipAsset, seqResolution.width, seqResolution.height, updateClipProperties]);
+    maybeAutoKeyframe(selectedClip, 'scaleX', nextScaleX);
+    maybeAutoKeyframe(selectedClip, 'scaleY', nextScaleY);
+    maybeAutoKeyframe(selectedClip, 'positionX', 0);
+    maybeAutoKeyframe(selectedClip, 'positionY', 0);
+  }, [
+    selectedClip,
+    clipAsset,
+    seqResolution.width,
+    seqResolution.height,
+    updateClipProperties,
+    maybeAutoKeyframe,
+  ]);
 
   const updateWidth = useCallback(
     (w: number) => {
@@ -677,6 +929,13 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     }
   }, [selectedMaskKeyframe, selectedMaskPointIndex]);
 
+  useEffect(() => {
+    setMaskMoveX(0);
+    setMaskMoveY(0);
+    setMaskScalePct(100);
+    setMaskRotateDeg(0);
+  }, [selectedMaskKeyframe?.id]);
+
   const cloneMaskPoints = useCallback((points: MaskPoint[]): MaskPoint[] => {
     return points.map((p) => ({
       x: p.x,
@@ -747,16 +1006,28 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const updateSelectedKeyframe = useCallback(
     (
       keyframeId: string,
-      patch: Partial<Pick<NonNullable<TimelineClipData['keyframes']>[number], 'frame' | 'value' | 'easing'>>,
+      patch: Partial<
+        Pick<
+          NonNullable<TimelineClipData['keyframes']>[number],
+          'frame' | 'value' | 'easing' | 'bezierHandles'
+        >
+      >,
     ) => {
       if (!selectedClip) return;
       const existing = selectedPropertyKeyframes.find((kf) => kf.id === keyframeId);
       if (!existing) return;
+      const nextEasing = patch.easing ?? existing.easing;
+      const nextHandles =
+        patch.bezierHandles ??
+        (nextEasing === 'bezier'
+          ? existing.bezierHandles ?? defaultBezierHandles()
+          : existing.bezierHandles);
       void upsertClipKeyframe(selectedClip.id, {
         ...existing,
         frame: patch.frame != null ? Math.max(0, Math.round(patch.frame)) : existing.frame,
         value: patch.value ?? existing.value,
-        easing: patch.easing ?? existing.easing,
+        easing: nextEasing,
+        bezierHandles: nextHandles,
       });
     },
     [selectedClip, selectedPropertyKeyframes, upsertClipKeyframe],
@@ -857,6 +1128,140 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       });
     },
     [selectedMaskKeyframe, cloneMaskPoints, upsertSelectedMaskKeyframe],
+  );
+
+  const smoothMaskPointHandles = useCallback(() => {
+    if (!selectedMaskKeyframe) return;
+    const points = cloneMaskPoints(selectedMaskKeyframe.points);
+    if (!points.length) return;
+    const idx = Math.max(0, Math.min(points.length - 1, selectedMaskPointIndex));
+    const current = points[idx];
+    if (!current) return;
+    const closed = selectedMask?.closed !== false;
+    const prev = closed
+      ? points[(idx - 1 + points.length) % points.length]
+      : points[Math.max(0, idx - 1)];
+    const next = closed ? points[(idx + 1) % points.length] : points[Math.min(points.length - 1, idx + 1)];
+    const tangentX = next.x - prev.x;
+    const tangentY = next.y - prev.y;
+    const tangentLength = Math.hypot(tangentX, tangentY);
+    if (tangentLength < 1e-5) {
+      current.inX = current.x;
+      current.inY = current.y;
+      current.outX = current.x;
+      current.outY = current.y;
+    } else {
+      const unitX = tangentX / tangentLength;
+      const unitY = tangentY / tangentLength;
+      const handleLength = Math.max(1, tangentLength / 6);
+      current.inX = current.x - unitX * handleLength;
+      current.inY = current.y - unitY * handleLength;
+      current.outX = current.x + unitX * handleLength;
+      current.outY = current.y + unitY * handleLength;
+    }
+    points[idx] = current;
+    upsertSelectedMaskKeyframe({
+      ...selectedMaskKeyframe,
+      points,
+    });
+  }, [selectedMaskKeyframe, selectedMaskPointIndex, cloneMaskPoints, upsertSelectedMaskKeyframe, selectedMask?.closed]);
+
+  const resetMaskPointHandles = useCallback(() => {
+    if (!selectedMaskPoint) return;
+    updateMaskPoint(selectedMaskPointIndex, {
+      inX: selectedMaskPoint.x,
+      inY: selectedMaskPoint.y,
+      outX: selectedMaskPoint.x,
+      outY: selectedMaskPoint.y,
+    });
+  }, [selectedMaskPoint, selectedMaskPointIndex, updateMaskPoint]);
+
+  const transformSelectedMaskShape = useCallback(
+    (options: {
+      translateX?: number;
+      translateY?: number;
+      scaleX?: number;
+      scaleY?: number;
+      rotateDeg?: number;
+    }) => {
+      if (!selectedMaskKeyframe) return;
+      if (!selectedMaskKeyframe.points.length) return;
+      const points = cloneMaskPoints(selectedMaskKeyframe.points);
+      const pivot = points.reduce(
+        (acc, pt) => ({ x: acc.x + pt.x, y: acc.y + pt.y }),
+        { x: 0, y: 0 },
+      );
+      const pivotX = pivot.x / points.length;
+      const pivotY = pivot.y / points.length;
+      const translateX = options.translateX ?? 0;
+      const translateY = options.translateY ?? 0;
+      const scaleX = options.scaleX ?? 1;
+      const scaleY = options.scaleY ?? 1;
+      const rotateRad = ((options.rotateDeg ?? 0) * Math.PI) / 180;
+      const cos = Math.cos(rotateRad);
+      const sin = Math.sin(rotateRad);
+
+      const transformCoord = (x: number, y: number): { x: number; y: number } => {
+        const localX = (x - pivotX) * scaleX;
+        const localY = (y - pivotY) * scaleY;
+        const rotX = localX * cos - localY * sin;
+        const rotY = localX * sin + localY * cos;
+        return {
+          x: pivotX + rotX + translateX,
+          y: pivotY + rotY + translateY,
+        };
+      };
+
+      const transformed = points.map((pt) => {
+        const p = transformCoord(pt.x, pt.y);
+        const inP = transformCoord(pt.inX, pt.inY);
+        const outP = transformCoord(pt.outX, pt.outY);
+        return {
+          x: p.x,
+          y: p.y,
+          inX: inP.x,
+          inY: inP.y,
+          outX: outP.x,
+          outY: outP.y,
+        };
+      });
+
+      upsertSelectedMaskKeyframe({
+        ...selectedMaskKeyframe,
+        points: transformed,
+      });
+    },
+    [selectedMaskKeyframe, cloneMaskPoints, upsertSelectedMaskKeyframe],
+  );
+
+  const applyMaskTransform = useCallback(() => {
+    const rawScale = maskScalePct / 100;
+    const safeScale = Math.abs(rawScale) < 0.001 ? (rawScale < 0 ? -0.001 : 0.001) : rawScale;
+    transformSelectedMaskShape({
+      translateX: maskMoveX,
+      translateY: maskMoveY,
+      scaleX: safeScale,
+      scaleY: safeScale,
+      rotateDeg: maskRotateDeg,
+    });
+    setMaskMoveX(0);
+    setMaskMoveY(0);
+    setMaskScalePct(100);
+    setMaskRotateDeg(0);
+  }, [maskMoveX, maskMoveY, maskScalePct, maskRotateDeg, transformSelectedMaskShape]);
+
+  const resetMaskTransformInputs = useCallback(() => {
+    setMaskMoveX(0);
+    setMaskMoveY(0);
+    setMaskScalePct(100);
+    setMaskRotateDeg(0);
+  }, []);
+
+  const nudgeMaskShape = useCallback(
+    (dx: number, dy: number) => {
+      transformSelectedMaskShape({ translateX: dx, translateY: dy });
+    },
+    [transformSelectedMaskShape],
   );
 
   const addMaskPoint = useCallback(() => {
@@ -1092,7 +1497,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   onClick={() => setLinkScale((v) => !v)}
                   title={linkScale ? 'Unlink width and height' : 'Link width and height'}
                 >
-                  {linkScale ? '🔗' : '⛓'}
+                  {linkScale ? 'Linked' : 'Unlinked'}
                 </button>
               </div>
               <SliderNumberField
@@ -1153,7 +1558,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   onClick={() => updateProp('speed', -(selectedClip.speed ?? 1))}
                   title="Reverse clip direction"
                 >
-                  ↺
+                  Reverse
                 </button>
                 <span className="rounded bg-zinc-700/60 px-2 py-1 text-[11px] text-zinc-200">
                   {speedLabel}
@@ -1171,7 +1576,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   }
                   title="Preserve pitch while changing speed"
                 >
-                  ♪ Preserve Pitch
+                  Preserve Pitch
                 </button>
               </div>
               <SliderNumberField
@@ -1418,6 +1823,17 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   >
                     Add @ {clipLocalFrame}f
                   </button>
+                  <button
+                    className={`rounded px-2 py-1 text-[11px] ${
+                      autoKeyframeEnabled
+                        ? 'bg-emerald-700/80 text-white hover:bg-emerald-600'
+                        : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                    }`}
+                    onClick={() => setAutoKeyframeEnabled(!autoKeyframeEnabled)}
+                    title="Auto-create keyframes while changing transform/opacity"
+                  >
+                    {autoKeyframeEnabled ? 'AutoKey On' : 'AutoKey'}
+                  </button>
                 </div>
 
                 <KeyframeMiniGraph
@@ -1425,66 +1841,143 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                   clipDuration={Math.max(1, selectedClip.durationFrames)}
                   property={kfProperty}
                   currentFrame={clipLocalFrame}
-                  onCommit={(keyframeId, frame, value) =>
-                    updateSelectedKeyframe(keyframeId, { frame, value })
-                  }
+                  onCommit={(keyframeId, patch) => updateSelectedKeyframe(keyframeId, patch)}
                 />
 
                 <div className="max-h-36 space-y-1 overflow-y-auto rounded border border-zinc-700 bg-zinc-900/40 p-1">
                   {selectedPropertyKeyframes.length === 0 && (
                     <div className="px-1 py-0.5 text-[10px] text-zinc-500">No keyframes yet</div>
                   )}
-                  {selectedPropertyKeyframes.map((kf) => (
-                    <div key={kf.id} className="grid grid-cols-[62px_1fr_92px_52px] items-center gap-1 text-[11px]">
-                      <input
-                        type="number"
-                        value={kf.frame}
-                        min={0}
-                        step={1}
-                        onChange={(e) => {
-                          const next = Number(e.target.value);
-                          if (!Number.isFinite(next)) return;
-                          updateSelectedKeyframe(kf.id, { frame: next });
-                        }}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
-                        title="Frame"
-                      />
-                      <input
-                        type="number"
-                        value={Number.isFinite(kf.value) ? kf.value : 0}
-                        step={0.01}
-                        onChange={(e) => {
-                          const next = Number(e.target.value);
-                          if (!Number.isFinite(next)) return;
-                          updateSelectedKeyframe(kf.id, { value: next });
-                        }}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
-                        title="Value"
-                      />
-                      <select
-                        value={kf.easing}
-                        onChange={(e) =>
-                          updateSelectedKeyframe(kf.id, {
-                            easing: e.target.value as NonNullable<TimelineClipData['keyframes']>[number]['easing'],
-                          })
-                        }
-                        className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-zinc-300"
-                        title="Easing"
-                      >
-                        <option value="linear">Linear</option>
-                        <option value="ease-in">Ease In</option>
-                        <option value="ease-out">Ease Out</option>
-                        <option value="ease-in-out">Ease In/Out</option>
-                        <option value="bezier">Bezier</option>
-                      </select>
-                      <button
-                        className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-700 hover:text-red-300"
-                        onClick={() => void removeClipKeyframe(selectedClip.id, kf.id)}
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
+                  {selectedPropertyKeyframes.map((kf) => {
+                    const handles = kf.bezierHandles ?? defaultBezierHandles();
+                    return (
+                      <div key={kf.id} className="rounded border border-zinc-700/60 bg-zinc-900/20 p-1">
+                        <div className="grid grid-cols-[62px_1fr_92px_52px] items-center gap-1 text-[11px]">
+                          <input
+                            type="number"
+                            value={kf.frame}
+                            min={0}
+                            step={1}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              updateSelectedKeyframe(kf.id, { frame: next });
+                            }}
+                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
+                            title="Frame"
+                          />
+                          <input
+                            type="number"
+                            value={Number.isFinite(kf.value) ? kf.value : 0}
+                            step={0.01}
+                            onChange={(e) => {
+                              const next = Number(e.target.value);
+                              if (!Number.isFinite(next)) return;
+                              updateSelectedKeyframe(kf.id, { value: next });
+                            }}
+                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
+                            title="Value"
+                          />
+                          <select
+                            value={kf.easing}
+                            onChange={(e) => {
+                              const easing =
+                                e.target.value as NonNullable<TimelineClipData['keyframes']>[number]['easing'];
+                              updateSelectedKeyframe(kf.id, {
+                                easing,
+                                bezierHandles:
+                                  easing === 'bezier'
+                                    ? kf.bezierHandles ?? defaultBezierHandles()
+                                    : kf.bezierHandles,
+                              });
+                            }}
+                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-zinc-300"
+                            title="Easing"
+                          >
+                            <option value="linear">Linear</option>
+                            <option value="ease-in">Ease In</option>
+                            <option value="ease-out">Ease Out</option>
+                            <option value="ease-in-out">Ease In/Out</option>
+                            <option value="bezier">Bezier</option>
+                          </select>
+                          <button
+                            className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-700 hover:text-red-300"
+                            onClick={() => void removeClipKeyframe(selectedClip.id, kf.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {kf.easing === 'bezier' && (
+                          <div className="mt-1 grid grid-cols-4 gap-1">
+                            <input
+                              type="number"
+                              value={handles.outX}
+                              step={0.01}
+                              min={0}
+                              max={1}
+                              title="Out X"
+                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (!Number.isFinite(v)) return;
+                                updateSelectedKeyframe(kf.id, {
+                                  bezierHandles: { ...handles, outX: clamp01(v) },
+                                });
+                              }}
+                            />
+                            <input
+                              type="number"
+                              value={handles.outY}
+                              step={0.01}
+                              min={0}
+                              max={1}
+                              title="Out Y"
+                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (!Number.isFinite(v)) return;
+                                updateSelectedKeyframe(kf.id, {
+                                  bezierHandles: { ...handles, outY: clamp01(v) },
+                                });
+                              }}
+                            />
+                            <input
+                              type="number"
+                              value={handles.inX}
+                              step={0.01}
+                              min={0}
+                              max={1}
+                              title="In X"
+                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (!Number.isFinite(v)) return;
+                                updateSelectedKeyframe(kf.id, {
+                                  bezierHandles: { ...handles, inX: clamp01(v) },
+                                });
+                              }}
+                            />
+                            <input
+                              type="number"
+                              value={handles.inY}
+                              step={0.01}
+                              min={0}
+                              max={1}
+                              title="In Y"
+                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (!Number.isFinite(v)) return;
+                                updateSelectedKeyframe(kf.id, {
+                                  bezierHandles: { ...handles, inY: clamp01(v) },
+                                });
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </CollapsibleSection>
@@ -1603,6 +2096,129 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
 
                     <div className="rounded border border-zinc-700 bg-zinc-900/30 p-2">
                       <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                        <span>Shape Transform</span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
+                            onClick={() => nudgeMaskShape(-1, 0)}
+                            title="Nudge left by 1px"
+                          >
+                            L
+                          </button>
+                          <button
+                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
+                            onClick={() => nudgeMaskShape(1, 0)}
+                            title="Nudge right by 1px"
+                          >
+                            R
+                          </button>
+                          <button
+                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
+                            onClick={() => nudgeMaskShape(0, -1)}
+                            title="Nudge up by 1px"
+                          >
+                            U
+                          </button>
+                          <button
+                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
+                            onClick={() => nudgeMaskShape(0, 1)}
+                            title="Nudge down by 1px"
+                          >
+                            D
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <SliderNumberField
+                          label="Move X"
+                          value={maskMoveX}
+                          min={-1000}
+                          max={1000}
+                          step={1}
+                          onChange={setMaskMoveX}
+                          format={(v) => `${Math.round(v)} px`}
+                        />
+                        <SliderNumberField
+                          label="Move Y"
+                          value={maskMoveY}
+                          min={-1000}
+                          max={1000}
+                          step={1}
+                          onChange={setMaskMoveY}
+                          format={(v) => `${Math.round(v)} px`}
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <SliderNumberField
+                          label="Scale"
+                          value={maskScalePct}
+                          min={1}
+                          max={400}
+                          step={1}
+                          onChange={setMaskScalePct}
+                          format={(v) => `${Math.round(v)}%`}
+                        />
+                        <SliderNumberField
+                          label="Rotate"
+                          value={maskRotateDeg}
+                          min={-180}
+                          max={180}
+                          step={1}
+                          onChange={setMaskRotateDeg}
+                          format={(v) => `${Math.round(v)} deg`}
+                        />
+                      </div>
+                      <div className="mt-1 flex items-center gap-1">
+                        <button
+                          className="rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
+                          onClick={applyMaskTransform}
+                          disabled={!selectedMaskKeyframe}
+                        >
+                          Apply
+                        </button>
+                        <button
+                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
+                          onClick={resetMaskTransformInputs}
+                        >
+                          Clear
+                        </button>
+                        <button
+                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
+                          onClick={() => transformSelectedMaskShape({ scaleX: 1.05, scaleY: 1.05 })}
+                          disabled={!selectedMaskKeyframe}
+                          title="Scale selected mask up by 5%"
+                        >
+                          Scale +
+                        </button>
+                        <button
+                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
+                          onClick={() => transformSelectedMaskShape({ scaleX: 1 / 1.05, scaleY: 1 / 1.05 })}
+                          disabled={!selectedMaskKeyframe}
+                          title="Scale selected mask down by 5%"
+                        >
+                          Scale -
+                        </button>
+                        <button
+                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
+                          onClick={() => transformSelectedMaskShape({ rotateDeg: -5 })}
+                          disabled={!selectedMaskKeyframe}
+                          title="Rotate selected mask by -5 deg"
+                        >
+                          Rot -
+                        </button>
+                        <button
+                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
+                          onClick={() => transformSelectedMaskShape({ rotateDeg: 5 })}
+                          disabled={!selectedMaskKeyframe}
+                          title="Rotate selected mask by +5 deg"
+                        >
+                          Rot +
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded border border-zinc-700 bg-zinc-900/30 p-2">
+                      <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
                         <span>Shape Keyframes</span>
                         <div className="flex items-center gap-1">
                           <button
@@ -1680,25 +2296,81 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                           </div>
 
                           {selectedMaskPoint && (
-                            <div className="grid grid-cols-2 gap-2">
-                              <SliderNumberField
-                                label="Point X"
-                                value={selectedMaskPoint.x}
-                                min={-baseWidth}
-                                max={baseWidth * 2}
-                                step={1}
-                                onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { x: v })}
-                                format={(v) => `${Math.round(v)} px`}
-                              />
-                              <SliderNumberField
-                                label="Point Y"
-                                value={selectedMaskPoint.y}
-                                min={-baseHeight}
-                                max={baseHeight * 2}
-                                step={1}
-                                onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { y: v })}
-                                format={(v) => `${Math.round(v)} px`}
-                              />
+                            <div className="space-y-2">
+                              <div className="grid grid-cols-2 gap-2">
+                                <SliderNumberField
+                                  label="Point X"
+                                  value={selectedMaskPoint.x}
+                                  min={-baseWidth}
+                                  max={baseWidth * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { x: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                                <SliderNumberField
+                                  label="Point Y"
+                                  value={selectedMaskPoint.y}
+                                  min={-baseHeight}
+                                  max={baseHeight * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { y: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <SliderNumberField
+                                  label="In X"
+                                  value={selectedMaskPoint.inX}
+                                  min={-baseWidth}
+                                  max={baseWidth * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { inX: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                                <SliderNumberField
+                                  label="In Y"
+                                  value={selectedMaskPoint.inY}
+                                  min={-baseHeight}
+                                  max={baseHeight * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { inY: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <SliderNumberField
+                                  label="Out X"
+                                  value={selectedMaskPoint.outX}
+                                  min={-baseWidth}
+                                  max={baseWidth * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { outX: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                                <SliderNumberField
+                                  label="Out Y"
+                                  value={selectedMaskPoint.outY}
+                                  min={-baseHeight}
+                                  max={baseHeight * 2}
+                                  step={1}
+                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { outY: v })}
+                                  format={(v) => `${Math.round(v)} px`}
+                                />
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600"
+                                  onClick={smoothMaskPointHandles}
+                                >
+                                  Smooth
+                                </button>
+                                <button
+                                  className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600"
+                                  onClick={resetMaskPointHandles}
+                                >
+                                  Corner
+                                </button>
+                              </div>
                             </div>
                           )}
                         </div>

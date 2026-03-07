@@ -13,6 +13,7 @@ interface SelectionState {
   timelineTool: 'select' | 'razor';
   rippleMode: boolean;
   linkedSelection: boolean;
+  autoKeyframeEnabled: boolean;
   activePanel:
     | 'project-browser'
     | 'source-monitor'
@@ -40,6 +41,7 @@ interface SelectionState {
   setTimelineTool: (tool: SelectionState['timelineTool']) => void;
   setRippleMode: (enabled: boolean) => void;
   setLinkedSelection: (enabled: boolean) => void;
+  setAutoKeyframeEnabled: (enabled: boolean) => void;
   setSourceAsset: (asset: ApiMediaAsset | null) => void;
   setSourceInTime: (time: number | null) => void;
   setSourceOutTime: (time: number | null) => void;
@@ -56,6 +58,7 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
   timelineTool: 'select',
   rippleMode: false,
   linkedSelection: true,
+  autoKeyframeEnabled: false,
   activePanel: null,
   sourceAsset: null,
   sourceInTime: null,
@@ -99,6 +102,8 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
   setRippleMode: (enabled) => set({ rippleMode: enabled }),
 
   setLinkedSelection: (enabled) => set({ linkedSelection: enabled }),
+
+  setAutoKeyframeEnabled: (enabled) => set({ autoKeyframeEnabled: enabled }),
 
   setSourceAsset: (asset) => set({ sourceAsset: asset, sourceInTime: null, sourceOutTime: null }),
 

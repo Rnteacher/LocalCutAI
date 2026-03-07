@@ -1,5 +1,5 @@
 /**
- * Timeline panel â€” the core editing surface.
+ * Timeline panel - the core editing surface.
  *
  * Shows track headers, clip blocks, playhead, and time ruler.
  * Supports drag-and-drop from project browser, clip selection,
@@ -12,6 +12,7 @@ import { usePlaybackStore } from '../stores/playbackStore.js';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import type { ApiMediaAsset } from '../lib/api.js';
 import type { TimelineMarker } from '../stores/playbackStore.js';
+import type { TimelineKeyframeData } from '../stores/projectStore.js';
 import { api } from '../lib/api.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 
@@ -76,6 +77,15 @@ interface TimelineTrack {
   channelMap?: 'L+R' | 'L' | 'R';
 }
 
+interface TimelineClipKeyframe {
+  id: string;
+  frame: number;
+  property: string;
+  value: number;
+  easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'bezier';
+  bezierHandles?: { inX: number; inY: number; outX: number; outY: number };
+}
+
 interface TimelineClip {
   id: string;
   name: string;
@@ -90,12 +100,7 @@ interface TimelineClip {
   pan?: number;
   audioGainDb?: number;
   audioVolume?: number;
-  keyframes?: Array<{
-    id: string;
-    frame: number;
-    property: string;
-    value: number;
-  }>;
+  keyframes?: TimelineClipKeyframe[];
   blendMode?: string;
   transitionIn?: {
     id: string;
@@ -130,8 +135,26 @@ interface DragState {
   startX: number; // mouse X at drag start
 }
 
+interface KeyframeDragState {
+  clipId: string;
+  keyframeId: string;
+  startX: number;
+  origFrame: number;
+  clipDurationFrames: number;
+}
+
 function normalizeTransitionType(type: string | undefined): 'cross-dissolve' | 'fade-black' {
   return type === 'fade-black' ? 'fade-black' : 'cross-dissolve';
+}
+
+function keyframeColor(property: string): string {
+  if (property.startsWith('transform.position')) return '#f97316';
+  if (property.startsWith('transform.scale')) return '#22c55e';
+  if (property === 'transform.rotation') return '#eab308';
+  if (property.startsWith('transform.anchor')) return '#60a5fa';
+  if (property.startsWith('mask.')) return '#22d3ee';
+  if (property === 'opacity') return '#a78bfa';
+  return '#93c5fd';
 }
 
 /** Extract fps from first sequence metadata, default 30. */
@@ -193,6 +216,7 @@ export function Timeline() {
   const rippleTrimClip = useProjectStore((s) => s.rippleTrimClip);
   const setClipTransition = useProjectStore((s) => s.setClipTransition);
   const splitClipAtPlayhead = useProjectStore((s) => s.splitClipAtPlayhead);
+  const upsertClipKeyframe = useProjectStore((s) => s.upsertClipKeyframe);
   const updateTrack = useProjectStore((s) => s.updateTrack);
   const isTrackLocked = useProjectStore((s) => s.isTrackLocked);
   const unlinkSelectedClips = useProjectStore((s) => s.unlinkSelectedClips);
@@ -248,6 +272,8 @@ export function Timeline() {
   // Clip move / trim interaction
   const dragRef = useRef<DragState | null>(null);
   const [dragDelta, setDragDelta] = useState(0); // px offset during drag
+  const keyframeDragRef = useRef<KeyframeDragState | null>(null);
+  const [keyframeDragFrame, setKeyframeDragFrame] = useState<number | null>(null);
 
   // Snap line state (null = no snap line visible)
   const [snapLineFrame, setSnapLineFrame] = useState<number | null>(null);
@@ -467,6 +493,16 @@ export function Timeline() {
         scrubToX(e.clientX);
         return;
       }
+      if (keyframeDragRef.current) {
+        const drag = keyframeDragRef.current;
+        const deltaFrames = Math.round((e.clientX - drag.startX) / pxPerFrame);
+        const nextFrame = Math.max(
+          0,
+          Math.min(drag.clipDurationFrames, drag.origFrame + deltaFrames),
+        );
+        setKeyframeDragFrame(nextFrame);
+        return;
+      }
       if (marqueeRef.current) {
         const container = containerRef.current;
         if (!container) return;
@@ -536,6 +572,40 @@ export function Timeline() {
       // End playhead scrub
       if (isScrubbingRef.current) {
         isScrubbingRef.current = false;
+        return;
+      }
+      if (keyframeDragRef.current) {
+        const drag = keyframeDragRef.current;
+        const finalFrame = keyframeDragFrame ?? drag.origFrame;
+        keyframeDragRef.current = null;
+        setKeyframeDragFrame(null);
+
+        if (finalFrame !== drag.origFrame) {
+          let keyframeToCommit: (TimelineClipKeyframe & {
+            easing?: TimelineKeyframeData['easing'];
+          }) | null = null;
+          for (const track of tracks) {
+            const clip = track.clips.find((c) => c.id === drag.clipId);
+            if (!clip) continue;
+            const kf = (clip.keyframes ?? []).find((item) => item.id === drag.keyframeId);
+            if (kf) {
+              keyframeToCommit = kf as TimelineClipKeyframe & {
+                easing?: TimelineKeyframeData['easing'];
+              };
+            }
+            break;
+          }
+          if (keyframeToCommit) {
+            void upsertClipKeyframe(drag.clipId, {
+              id: keyframeToCommit.id,
+              property: keyframeToCommit.property as TimelineKeyframeData['property'],
+              frame: finalFrame,
+              value: keyframeToCommit.value,
+              easing: keyframeToCommit.easing ?? 'linear',
+              bezierHandles: keyframeToCommit.bezierHandles,
+            });
+          }
+        }
         return;
       }
       if (marqueeRef.current) {
@@ -653,11 +723,13 @@ export function Timeline() {
     tracks,
     currentFrame,
     markers,
+    keyframeDragFrame,
     dragDelta,
     getTrackIdFromClientY,
     rippleMode,
     linkedSelection,
     isTrackLocked,
+    upsertClipKeyframe,
     setClipTransition,
     clearClipSelection,
     selectClip,
@@ -733,6 +805,30 @@ export function Timeline() {
       setIsRipple(false);
     },
     [isTrackLocked, timelineTool, setActivePanel, selectClip],
+  );
+
+  const handleKeyframeMouseDown = useCallback(
+    (
+      clip: TimelineClip,
+      keyframe: TimelineClipKeyframe,
+      e: React.MouseEvent,
+    ) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (timelineTool === 'razor') return;
+      setActivePanel('timeline');
+      selectClip(clip.id, e.shiftKey || e.ctrlKey || e.metaKey);
+      setCurrentFrame(Math.max(0, Math.round(clip.startFrame + keyframe.frame)));
+      keyframeDragRef.current = {
+        clipId: clip.id,
+        keyframeId: keyframe.id,
+        startX: e.clientX,
+        origFrame: Math.max(0, Math.round(keyframe.frame)),
+        clipDurationFrames: Math.max(1, clip.durationFrames),
+      };
+      setKeyframeDragFrame(Math.max(0, Math.round(keyframe.frame)));
+    },
+    [timelineTool, setActivePanel, selectClip, setCurrentFrame],
   );
 
   // --- Click handlers ---
@@ -1209,7 +1305,7 @@ export function Timeline() {
               onClick={() => zoomAroundPlayhead(1 / 1.25)}
               title="Zoom out around playhead"
             >
-              âˆ’
+              -
             </button>
             <span
               className="w-24 text-center font-mono text-[10px] text-zinc-500"
@@ -1236,7 +1332,7 @@ export function Timeline() {
               title="Previous marker ([)"
               onClick={jumpToPrevMarker}
             >
-              â—€M
+              PM
             </button>
             <button
               className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:text-zinc-300"
@@ -1250,7 +1346,7 @@ export function Timeline() {
               title="Next marker (])"
               onClick={jumpToNextMarker}
             >
-              Mâ–¶
+              NM
             </button>
             <span className="rounded bg-zinc-700/40 px-1 py-0.5 text-[9px] text-fuchsia-300">
               {markers.length}m
@@ -1366,7 +1462,7 @@ export function Timeline() {
                     title="Lock"
                     onClick={() => updateTrack(track.id, { locked: !track.locked })}
                   >
-                    ðŸ”’
+                    Lk
                   </button>
                   <button
                     className={`rounded px-1 text-[10px] ${track.syncLocked !== false ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-300'}`}
@@ -1628,11 +1724,24 @@ export function Timeline() {
                     transitionOutDuration == null
                       ? 0
                       : Math.max(6, Math.min(style.width * 0.35, transitionOutDuration * pxPerFrame));
+                  const resolveVisualKeyframeFrame = (
+                    keyframe: TimelineClipKeyframe,
+                  ): number => {
+                    if (
+                      keyframeDragRef.current?.clipId === clip.id &&
+                      keyframeDragRef.current?.keyframeId === keyframe.id &&
+                      keyframeDragFrame != null
+                    ) {
+                      return keyframeDragFrame;
+                    }
+                    return keyframe.frame;
+                  };
+                  const hasKeyframeLane = (clip.keyframes?.length ?? 0) > 0 && style.width > 24;
                   const clipSpeed = clip.speed ?? 1;
                   const showSpeedBadge = Math.abs(clipSpeed - 1) > 0.001;
                   const speedBadge =
                     clipSpeed < 0
-                      ? `â†º ${Math.round(Math.abs(clipSpeed) * 100)}%`
+                      ? `REV ${Math.round(Math.abs(clipSpeed) * 100)}%`
                       : `${Math.round(clipSpeed * 100)}%`;
 
                   return (
@@ -1677,13 +1786,45 @@ export function Timeline() {
                           {clip.keyframes!.map((kf) => {
                             const pct = Math.max(
                               0,
-                              Math.min(1, kf.frame / Math.max(1, clip.durationFrames)),
+                              Math.min(1, resolveVisualKeyframeFrame(kf) / Math.max(1, clip.durationFrames)),
                             );
                             return (
                               <div
                                 key={kf.id}
                                 className="absolute h-1.5 w-1.5 rotate-45 bg-blue-300/80"
                                 style={{ left: `${pct * 100}%`, top: 0 }}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
+                      {hasKeyframeLane && (
+                        <div className="absolute bottom-2 left-1 right-1 h-2 rounded bg-black/25">
+                          <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-zinc-300/20" />
+                          {clip.keyframes!.map((kf) => {
+                            const frame = resolveVisualKeyframeFrame(kf);
+                            const pct = Math.max(0, Math.min(1, frame / Math.max(1, clip.durationFrames)));
+                            const isDragged =
+                              keyframeDragRef.current?.clipId === clip.id &&
+                              keyframeDragRef.current?.keyframeId === kf.id;
+                            return (
+                              <div
+                                key={`lane-${kf.id}`}
+                                className={`absolute top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rotate-45 border ${
+                                  isDragged
+                                    ? 'border-white bg-white/90'
+                                    : 'border-zinc-950 bg-zinc-100/85 hover:scale-110'
+                                }`}
+                                style={{ left: `${pct * 100}%`, backgroundColor: keyframeColor(kf.property) }}
+                                title={`${kf.property} @ ${Math.round(frame)}f`}
+                                onMouseDown={(e) => handleKeyframeMouseDown(clip, kf, e)}
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  setCurrentFrame(
+                                    Math.max(0, Math.round(clip.startFrame + resolveVisualKeyframeFrame(kf))),
+                                  );
+                                }}
                               />
                             );
                           })}
@@ -2171,4 +2312,5 @@ function TimeRuler({
 function pad(n: number): string {
   return n.toString().padStart(2, '0');
 }
+
 

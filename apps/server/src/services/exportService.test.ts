@@ -977,6 +977,177 @@ describe('ExportService new timeline model support', () => {
     expect(inMid!.gain).toBeCloseTo(Math.sin(Math.PI / 4), 3);
   });
 });
+
+describe('ExportService preview/export parity (segment sampling)', () => {
+  it('matches centered cross-dissolve video opacity and audio equal-power at sampled frames', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-parity-dissolve',
+      projectId: 'proj1',
+      name: 'Sequence parity dissolve',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'out',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionOut: {
+                id: 'tout',
+                type: 'cross-dissolve',
+                durationFrames: 12,
+                audioCrossfade: true,
+              },
+            },
+            {
+              id: 'in',
+              mediaAssetId: 'm2',
+              type: 'video',
+              startFrame: 24,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionIn: {
+                id: 'tin',
+                type: 'cross-dissolve',
+                durationFrames: 12,
+                audioCrossfade: true,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const { videoSegments, audioSegments } = mod.__test__.extractSegments(sequence);
+
+    const sampleSegment = <T extends { clipId: string; startFrame: number; endFrame: number }>(
+      segments: T[],
+      clipId: string,
+      frame: number,
+    ): T | null =>
+      segments.find((s) => s.clipId === clipId && s.startFrame <= frame && s.endFrame > frame) ?? null;
+
+    const sampledFrames = [19, 24, 29]; // within centered dissolve window [18, 30)
+    for (const frame of sampledFrames) {
+      const progress = (frame - 18) / 12;
+      const expectedOutOpacity = 1 - progress;
+      const expectedInOpacity = progress;
+      const expectedOutGain = Math.cos((progress * Math.PI) / 2);
+      const expectedInGain = Math.sin((progress * Math.PI) / 2);
+
+      const outVideo = sampleSegment(videoSegments, 'out', frame);
+      const inVideo = sampleSegment(videoSegments, 'in', frame);
+      const outAudio = sampleSegment(audioSegments, 'out', frame);
+      const inAudio = sampleSegment(audioSegments, 'in', frame);
+
+      expect(outVideo).toBeTruthy();
+      expect(inVideo).toBeTruthy();
+      expect(outAudio).toBeTruthy();
+      expect(inAudio).toBeTruthy();
+
+      expect(outVideo!.opacity).toBeCloseTo(expectedOutOpacity, 3);
+      expect(inVideo!.opacity).toBeCloseTo(expectedInOpacity, 3);
+      expect(outAudio!.gain).toBeCloseTo(expectedOutGain, 3);
+      expect(inAudio!.gain).toBeCloseTo(expectedInGain, 3);
+    }
+  });
+
+  it('matches fade-black preview semantics via black overlay segment at sampled frames', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-parity-fade-black',
+      projectId: 'proj1',
+      name: 'Sequence parity fade black',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              transitionOut: {
+                id: 'fb1',
+                type: 'fade-black',
+                durationFrames: 12,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const { videoSegments } = mod.__test__.extractSegments(sequence);
+
+    const sampleContent = (frame: number) =>
+      videoSegments.find(
+        (s: any) =>
+          s.clipId === 'c1' &&
+          s.mediaAssetId === 'm1' &&
+          s.startFrame <= frame &&
+          s.endFrame > frame,
+      ) ?? null;
+
+    const sampleBlackOverlay = (frame: number) =>
+      videoSegments.find(
+        (s: any) =>
+          s.clipId === 'c1' &&
+          s.mediaAssetId == null &&
+          s.generator?.kind === 'black-video' &&
+          s.startFrame <= frame &&
+          s.endFrame > frame,
+      ) ?? null;
+
+    const sampledFrames = [13, 18, 23]; // within out-transition window [12, 24)
+    for (const frame of sampledFrames) {
+      const progress = (frame - 12) / 12;
+      const expectedContent = 1 - progress;
+      const expectedBlack = progress;
+
+      const content = sampleContent(frame);
+      const black = sampleBlackOverlay(frame);
+      expect(content).toBeTruthy();
+      expect(black).toBeTruthy();
+
+      expect(content!.opacity).toBeCloseTo(expectedContent, 3);
+      expect(black!.opacity).toBeCloseTo(expectedBlack, 3);
+      expect(content!.opacity + black!.opacity).toBeCloseTo(1, 3);
+    }
+  });
+});
 describe('TimeValue to seconds conversion', () => {
   // Test the inline timeToSeconds logic by computing expected values
   function timeToSeconds(tv: { frames: number; rate: { num: number; den: number } }): number {
