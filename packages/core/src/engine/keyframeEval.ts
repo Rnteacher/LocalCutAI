@@ -244,6 +244,16 @@ function getDefaultForProperty(clip: ClipItem, property: AnimatableProperty): nu
       return clip.transform.scaleY;
     case 'transform.rotation':
       return clip.transform.rotation;
+    case 'transform.anchorX':
+      return clip.transform.anchorX;
+    case 'transform.anchorY':
+      return clip.transform.anchorY;
+    case 'mask.opacity':
+      return 1;
+    case 'mask.feather':
+      return 0;
+    case 'mask.expansion':
+      return 0;
     default:
       return 0;
   }

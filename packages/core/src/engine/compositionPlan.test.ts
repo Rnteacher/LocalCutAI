@@ -38,6 +38,7 @@ function makeClip(
     transitionIn: null,
     transitionOut: null,
     masks: [],
+    generator: null,
     disabled: false,
     ...overrides,
   };
@@ -164,7 +165,7 @@ describe('buildCompositionPlan', () => {
       duration: tv(48),
       transitionIn: {
         id: 'TR1',
-        type: 'dissolve',
+        type: 'cross-dissolve',
         duration: tv(12),
         params: {},
       },
@@ -175,7 +176,9 @@ describe('buildCompositionPlan', () => {
     // At frame 6 of a 12-frame transition, progress should be 0.5
     const plan = buildCompositionPlan(seq, tv(6));
     expect(plan.videoLayers[0].transitionProgress).toBeCloseTo(0.5);
-    expect(plan.videoLayers[0].transitionType).toBe('dissolve');
+    expect(plan.videoLayers[0].transitionType).toBe('cross-dissolve');
+    expect(plan.videoLayers[0].transitionPhase).toBe('in');
+    expect(plan.videoLayers[0].transitionAudioCrossfade).toBe(true);
   });
 
   it('no transition when past transitionIn duration', () => {
@@ -185,7 +188,7 @@ describe('buildCompositionPlan', () => {
       duration: tv(48),
       transitionIn: {
         id: 'TR1',
-        type: 'dissolve',
+        type: 'cross-dissolve',
         duration: tv(12),
         params: {},
       },
@@ -203,5 +206,63 @@ describe('buildCompositionPlan', () => {
     expect(plan.sequenceId).toBe('SEQ1');
     expect(plan.resolution.width).toBe(1920);
     expect(plan.resolution.height).toBe(1080);
+  });
+
+  it('evaluates anchor keyframes on transform', () => {
+    const clip = makeClip({
+      id: 'C1',
+      startTime: tv(0),
+      duration: tv(48),
+      transform: {
+        positionX: 0,
+        positionY: 0,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+        anchorX: 0.5,
+        anchorY: 0.5,
+      },
+      keyframes: [
+        {
+          id: 'K1',
+          clipId: 'C1',
+          property: 'transform.anchorX',
+          time: tv(0),
+          value: 0.2,
+          easing: 'linear',
+        },
+        {
+          id: 'K2',
+          clipId: 'C1',
+          property: 'transform.anchorX',
+          time: tv(24),
+          value: 0.8,
+          easing: 'linear',
+        },
+        {
+          id: 'K3',
+          clipId: 'C1',
+          property: 'transform.anchorY',
+          time: tv(0),
+          value: 0.3,
+          easing: 'linear',
+        },
+        {
+          id: 'K4',
+          clipId: 'C1',
+          property: 'transform.anchorY',
+          time: tv(24),
+          value: 0.7,
+          easing: 'linear',
+        },
+      ],
+    });
+    const track = makeTrack('V1', [clip]);
+    const seq = makeSequence([track]);
+
+    const plan = buildCompositionPlan(seq, tv(12));
+    expect(plan.videoLayers).toHaveLength(1);
+    expect(plan.videoLayers[0].transform.anchorX).toBeCloseTo(0.5);
+    expect(plan.videoLayers[0].transform.anchorY).toBeCloseTo(0.5);
   });
 });

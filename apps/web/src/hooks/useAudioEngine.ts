@@ -296,7 +296,20 @@ export function useAudioEngine(): void {
           const gainDb = clip?.audioGainDb ?? gainToDb(clip?.gain ?? clip?.audioVolume ?? 1);
           const userGain = dbToGain(gainDb);
           source.element.volume = 1;
-          const totalGain = sourcePlan.gain * userGain;
+          let transitionGain = 1;
+          if (
+            sourcePlan.transitionType === 'cross-dissolve' &&
+            sourcePlan.transitionAudioCrossfade &&
+            sourcePlan.transitionProgress != null &&
+            sourcePlan.transitionPhase
+          ) {
+            const t = Math.max(0, Math.min(1, sourcePlan.transitionProgress));
+            transitionGain =
+              sourcePlan.transitionPhase === 'in'
+                ? Math.sin((t * Math.PI) / 2)
+                : Math.cos((t * Math.PI) / 2);
+          }
+          const totalGain = sourcePlan.gain * userGain * transitionGain;
           const now = audioCtxRef.current?.currentTime;
           if (now != null) {
             source.gainNode.gain.setTargetAtTime(totalGain, now, 0.01);

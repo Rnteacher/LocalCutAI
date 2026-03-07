@@ -1,5 +1,5 @@
 /**
- * Timeline Model Adapter — converts the store's flat timeline model into
+ * Timeline Model Adapter - converts the store's flat timeline model into
  * canonical @localcut/core sequence types.
  */
 
@@ -11,6 +11,13 @@ import type {
   Track,
   ClipItem,
   TransformState,
+  BlendMode,
+  TransitionData,
+  TransitionType,
+  ClipBlendParams,
+  ManualMaskData,
+  GeneratorData,
+  Keyframe,
 } from './core.js';
 import type { TimelineTrackData, TimelineClipData } from '../stores/projectStore.js';
 
@@ -31,6 +38,90 @@ const DEFAULT_TRANSFORM: TransformState = {
   anchorX: 0.5,
   anchorY: 0.5,
 };
+
+function normalizeBlendMode(mode: TimelineClipData['blendMode']): BlendMode {
+  if (
+    mode === 'normal' ||
+    mode === 'multiply' ||
+    mode === 'screen' ||
+    mode === 'overlay' ||
+    mode === 'add' ||
+    mode === 'silhouette-alpha' ||
+    mode === 'silhouette-luma'
+  ) {
+    return mode;
+  }
+  return 'normal';
+}
+
+function normalizeTransitionType(type: unknown): TransitionType {
+  if (type === 'cross-dissolve' || type === 'fade-black') {
+    return type;
+  }
+  if (type === 'dissolve' || type === 'wipe-left' || type === 'wipe-right') {
+    return 'cross-dissolve';
+  }
+  return 'cross-dissolve';
+}
+
+function adaptTransition(
+  transition: TimelineClipData['transitionIn'],
+  rate: FrameRate,
+): TransitionData | null {
+  if (!transition) return null;
+  const durationFrames = Math.max(1, Math.round(transition.durationFrames ?? 0));
+  if (!Number.isFinite(durationFrames) || durationFrames <= 0) {
+    return null;
+  }
+  return {
+    id: transition.id,
+    type: normalizeTransitionType(transition.type),
+    duration: framesToTimeValue(durationFrames, rate),
+    audioCrossfade: transition.audioCrossfade,
+  };
+}
+
+function adaptKeyframes(clip: TimelineClipData, rate: FrameRate): Keyframe[] {
+  if (!clip.keyframes || clip.keyframes.length === 0) return [];
+  return clip.keyframes.map((kf) => ({
+    id: kf.id,
+    clipId: clip.id,
+    property: kf.property,
+    time: framesToTimeValue(kf.frame, rate),
+    value: kf.value,
+    easing: kf.easing,
+    bezierHandles: kf.bezierHandles,
+  }));
+}
+
+function adaptMasks(masks: TimelineClipData['masks']): ManualMaskData[] {
+  if (!masks || masks.length === 0) return [];
+  return masks.map((mask) => ({
+    ...mask,
+    keyframes: mask.keyframes.map((kf) => ({
+      ...kf,
+      points: kf.points.map((p) => ({ ...p })),
+    })),
+  }));
+}
+
+function adaptGenerator(generator: TimelineClipData['generator']): GeneratorData | null {
+  if (!generator) return null;
+  if (
+    generator.kind !== 'black-video' &&
+    generator.kind !== 'color-matte' &&
+    generator.kind !== 'adjustment-layer'
+  ) {
+    return null;
+  }
+  if (generator.kind === 'color-matte') {
+    return {
+      kind: 'color-matte',
+      color: generator.color ?? '#000000',
+    };
+  }
+  return { kind: generator.kind };
+}
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -65,7 +156,7 @@ function adaptClip(clip: TimelineClipData, trackId: string, rate: FrameRate): Cl
     pan: 0,
     audioEnvelope: [],
 
-    // Transform — use clip values with defaults
+    // Transform - use clip values with defaults
     transform: {
       positionX: clip.positionX ?? DEFAULT_TRANSFORM.positionX,
       positionY: clip.positionY ?? DEFAULT_TRANSFORM.positionY,
@@ -76,16 +167,18 @@ function adaptClip(clip: TimelineClipData, trackId: string, rate: FrameRate): Cl
       anchorY: DEFAULT_TRANSFORM.anchorY,
     },
 
-    // Visual — use clip value with default
+    // Visual
     opacity: clip.opacity ?? 1,
-    blendMode: 'normal',
+    blendMode: normalizeBlendMode(clip.blendMode),
+    blendParams: {
+      silhouetteGamma: (clip.blendParams as ClipBlendParams | undefined)?.silhouetteGamma ?? 1,
+    },
 
-    // No keyframes/transitions from the store yet
-    keyframes: [],
-    transitionIn: null,
-    transitionOut: null,
-
-    masks: [],
+    keyframes: adaptKeyframes(clip, rate),
+    transitionIn: adaptTransition(clip.transitionIn, rate),
+    transitionOut: adaptTransition(clip.transitionOut, rate),
+    masks: adaptMasks(clip.masks),
+    generator: adaptGenerator(clip.generator),
     disabled: false,
   };
 }
@@ -113,12 +206,6 @@ function adaptTrack(track: TimelineTrackData, rate: FrameRate): Track {
 /**
  * Convert flat sequence data (as stored in SQLite / projectStore) into a
  * full `Sequence` that can be passed to `buildCompositionPlan()`.
- *
- * @param seqId     - The sequence ID.
- * @param tracks    - Flat track data from projectStore.
- * @param frameRate - The sequence's frame rate.
- * @param resolution - The sequence's resolution.
- * @returns A fully typed `Sequence` compatible with the core engine.
  */
 export function adaptSequence(
   seqId: string,
@@ -130,7 +217,6 @@ export function adaptSequence(
 ): Sequence {
   const coreTracks = tracks.map((t) => adaptTrack(t, frameRate));
 
-  // Compute total duration as end of last clip
   let maxFrame = 0;
   for (const track of tracks) {
     for (const clip of track.clips) {

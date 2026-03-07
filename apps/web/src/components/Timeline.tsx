@@ -90,6 +90,16 @@ interface TimelineClip {
   pan?: number;
   audioGainDb?: number;
   audioVolume?: number;
+  keyframes?: Array<{
+    id: string;
+    frame: number;
+    property: string;
+    value: number;
+  }>;
+  blendMode?: string;
+  transitionIn?: { id: string; type: string; durationFrames: number } | null;
+  transitionOut?: { id: string; type: string; durationFrames: number } | null;
+  generator?: { kind: 'black-video' | 'color-matte' | 'adjustment-layer'; color?: string } | null;
 }
 
 // Drag/Trim interaction state
@@ -156,6 +166,7 @@ export function Timeline() {
   const sequences = useProjectStore((s) => s.sequences);
   const uploadMedia = useProjectStore((s) => s.uploadMedia);
   const addClipToTrack = useProjectStore((s) => s.addClipToTrack);
+  const addGeneratorClip = useProjectStore((s) => s.addGeneratorClip);
   const updateProjectSettings = useProjectStore((s) => s.updateProjectSettings);
   const addTrack = useProjectStore((s) => s.addTrack);
   const mediaAssets = useProjectStore((s) => s.mediaAssets);
@@ -291,6 +302,18 @@ export function Timeline() {
     const data = sequences[0]?.data as { tracks?: TimelineTrack[] } | undefined;
     return data?.tracks ?? [];
   })();
+
+  const resolveTargetVideoTrackId = useCallback((): string | null => {
+    const unlocked = tracks.filter((t) => t.type === 'video' && !t.locked);
+    if (unlocked.length === 0) return null;
+    if (targetVideoTrackId && unlocked.some((t) => t.id === targetVideoTrackId)) {
+      return targetVideoTrackId;
+    }
+    const preferred =
+      unlocked.find((t) => t.name.trim().toUpperCase() === 'V1') ??
+      [...unlocked].sort((a, b) => a.index - b.index)[0];
+    return preferred?.id ?? null;
+  }, [tracks, targetVideoTrackId]);
 
   const maybePromptFirstClipProjectMatch = useCallback(
     (
@@ -1053,6 +1076,60 @@ export function Timeline() {
               +A
             </button>
             <button
+              className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              onClick={() => {
+                const trackId = resolveTargetVideoTrackId();
+                if (!trackId) return;
+                void addGeneratorClip({
+                  trackId,
+                  generator: { kind: 'black-video' },
+                  startFrame: currentFrame,
+                  durationFrames: Math.max(1, Math.round(fps * 5)),
+                  insertMode: rippleMode ? 'ripple' : 'overwrite',
+                });
+              }}
+              title="Insert black video at playhead"
+            >
+              +Black
+            </button>
+            <button
+              className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              onClick={() => {
+                const trackId = resolveTargetVideoTrackId();
+                if (!trackId) return;
+                const value = window.prompt('Color matte hex (#RRGGBB)', '#3b82f6') ?? '';
+                const color = value.trim();
+                if (!/^#[0-9a-fA-F]{6}$/.test(color)) return;
+                void addGeneratorClip({
+                  trackId,
+                  generator: { kind: 'color-matte', color },
+                  startFrame: currentFrame,
+                  durationFrames: Math.max(1, Math.round(fps * 5)),
+                  insertMode: rippleMode ? 'ripple' : 'overwrite',
+                });
+              }}
+              title="Insert color matte at playhead"
+            >
+              +Color
+            </button>
+            <button
+              className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+              onClick={() => {
+                const trackId = resolveTargetVideoTrackId();
+                if (!trackId) return;
+                void addGeneratorClip({
+                  trackId,
+                  generator: { kind: 'adjustment-layer' },
+                  startFrame: currentFrame,
+                  durationFrames: Math.max(1, Math.round(fps * 5)),
+                  insertMode: rippleMode ? 'ripple' : 'overwrite',
+                });
+              }}
+              title="Insert adjustment layer at playhead"
+            >
+              +Adj
+            </button>
+            <button
               className="text-xs text-zinc-400 hover:text-white"
               onClick={() => zoomAroundPlayhead(1 / 1.25)}
               title="Zoom out around playhead"
@@ -1438,7 +1515,33 @@ export function Timeline() {
                             {speedBadge}
                           </span>
                         )}
+                        {clip.generator && (
+                          <span className="shrink-0 rounded bg-black/40 px-1 text-[9px] text-amber-200">
+                            {clip.generator.kind === 'adjustment-layer'
+                              ? 'ADJ'
+                              : clip.generator.kind === 'color-matte'
+                                ? 'MATTE'
+                                : 'BLACK'}
+                          </span>
+                        )}
                       </div>
+                      {(clip.keyframes?.length ?? 0) > 0 && (
+                        <div className="pointer-events-none absolute left-1 right-1 top-4 h-2">
+                          {clip.keyframes!.map((kf) => {
+                            const pct = Math.max(
+                              0,
+                              Math.min(1, kf.frame / Math.max(1, clip.durationFrames)),
+                            );
+                            return (
+                              <div
+                                key={kf.id}
+                                className="absolute h-1.5 w-1.5 rotate-45 bg-blue-300/80"
+                                style={{ left: `${pct * 100}%`, top: 0 }}
+                              />
+                            );
+                          })}
+                        </div>
+                      )}
                       {/* Waveform for audio clips */}
                       {track.type === 'audio' && clip.mediaAssetId && style.width > 10 && (
                         <WaveformCanvas
@@ -1452,6 +1555,30 @@ export function Timeline() {
                                 : Math.pow(10, clip.audioGainDb / 20)
                               : (clip.gain ?? clip.audioVolume ?? 1)
                           }
+                        />
+                      )}
+                      {clip.transitionIn && (
+                        <div
+                          className="pointer-events-none absolute left-0 top-0 border-r border-r-cyan-300/80 border-t border-t-transparent border-b border-b-transparent"
+                          style={{
+                            width: 0,
+                            height: 0,
+                            borderTopWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
+                            borderBottomWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
+                            borderRightWidth: `${Math.max(6, Math.min(style.width * 0.25, clip.transitionIn.durationFrames * pxPerFrame))}px`,
+                          }}
+                        />
+                      )}
+                      {clip.transitionOut && (
+                        <div
+                          className="pointer-events-none absolute right-0 top-0 border-l border-l-cyan-300/80 border-t border-t-transparent border-b border-b-transparent"
+                          style={{
+                            width: 0,
+                            height: 0,
+                            borderTopWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
+                            borderBottomWidth: `${(TRACK_HEIGHT - 8) / 2}px`,
+                            borderLeftWidth: `${Math.max(6, Math.min(style.width * 0.25, clip.transitionOut.durationFrames * pxPerFrame))}px`,
+                          }}
                         />
                       )}
                       {/* Left trim handle */}

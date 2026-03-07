@@ -41,6 +41,7 @@ function makeClip(
     transitionIn: null,
     transitionOut: null,
     masks: [],
+    generator: null,
     disabled: false,
     ...overrides,
   };

@@ -22,8 +22,13 @@ export type {
   AudioEnvelopePoint,
   TransformState,
   BlendMode,
-  Transition,
+  TransitionData,
   TransitionType,
+  ClipBlendParams,
+  MaskPoint,
+  MaskShapeKeyframe,
+  ManualMaskData,
+  GeneratorData,
 } from './timeline.js';
 
 // Keyframe types

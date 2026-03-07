@@ -101,6 +101,7 @@ interface StoredClipData {
   audioPan?: number;
   opacity?: number;
   blendMode?: BlendMode;
+  blendParams?: { silhouetteGamma?: number };
   disabled?: boolean;
 
   positionX?: number;
@@ -114,6 +115,35 @@ interface StoredClipData {
   saturation?: number;
   hue?: number;
   vignette?: number;
+
+  keyframes?: Array<{
+    id?: string;
+    property?: string;
+    frame?: number;
+    value?: number;
+    easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'bezier';
+    bezierHandles?: { inX: number; inY: number; outX: number; outY: number };
+    time?: { frames?: number };
+  }>;
+  transitionIn?: {
+    id?: string;
+    type?: string;
+    durationFrames?: number;
+    duration?: { frames?: number };
+    audioCrossfade?: boolean;
+  } | null;
+  transitionOut?: {
+    id?: string;
+    type?: string;
+    durationFrames?: number;
+    duration?: { frames?: number };
+    audioCrossfade?: boolean;
+  } | null;
+  masks?: unknown[];
+  generator?: {
+    kind?: 'black-video' | 'color-matte' | 'adjustment-layer' | string;
+    color?: string;
+  } | null;
 }
 
 interface StoredExportMeta {
@@ -130,7 +160,8 @@ interface StoredExportMeta {
 interface VideoSegment {
   clipId: string;
   trackId: string;
-  mediaAssetId: string;
+  mediaAssetId: string | null;
+  generator: ClipItem['generator'];
   z: number;
   startFrame: number;
   endFrame: number;
@@ -382,7 +413,9 @@ function buildFFmpegArgs(
     return idx;
   };
 
-  for (const seg of videoSegments) registerInput(seg.mediaAssetId);
+  for (const seg of videoSegments) {
+    if (seg.mediaAssetId) registerInput(seg.mediaAssetId);
+  }
   for (const seg of audioSegments) registerInput(seg.mediaAssetId);
 
   if (videoSegments.length === 0 && audioSegments.length === 0) {
@@ -429,8 +462,6 @@ function buildFFmpegArgs(
 
   for (let i = 0; i < sortedVideo.length; i++) {
     const seg = sortedVideo[i];
-    const inputIndex = registerInput(seg.mediaAssetId);
-    if (inputIndex == null) continue;
 
     const startSec = framesToSeconds(seg.startFrame, sequence.frameRate);
     const durSec = framesToSeconds(seg.endFrame - seg.startFrame, sequence.frameRate);
@@ -444,21 +475,69 @@ function buildFFmpegArgs(
     const overlayY = `(H-h)/2+${seg.positionY.toFixed(3)}`;
     const clipMeta = storedMeta?.clipById.get(seg.clipId);
     const colorFilterChain = buildVideoColorFilterChain(clipMeta);
+    const blendMode = seg.blendMode ?? 'normal';
 
-    filterParts.push(
-      `[${inputIndex}:v]trim=start=${inSec}:duration=${durSec},setpts=PTS-STARTPTS,` +
-        `scale='if(gt(a,${width}/${height}),${width},-2)':'if(gt(a,${width}/${height}),-2,${height})',` +
-        `setsar=1,` +
-        `${colorFilterChain}` +
-        `scale=iw*${scaleX.toFixed(6)}:ih*${scaleY.toFixed(6)},` +
-        `format=rgba,` +
-        `rotate=${rotationRad.toFixed(8)}:ow=rotw(iw):oh=roth(ih):c=none,` +
-        `colorchannelmixer=aa=${clamp01(seg.opacity)}[${vLabel}]`,
-    );
+    if (seg.generator?.kind === 'adjustment-layer') {
+      throw new Error('Export for adjustment-layer is not supported yet in FFmpeg pipeline.');
+    }
 
-    filterParts.push(
-      `[${lastOverlay}][${vLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${ovLabel}]`,
-    );
+    if (seg.mediaAssetId) {
+      const inputIndex = registerInput(seg.mediaAssetId);
+      if (inputIndex == null) continue;
+      filterParts.push(
+        `[${inputIndex}:v]trim=start=${inSec}:duration=${durSec},setpts=PTS-STARTPTS,` +
+          `scale='if(gt(a,${width}/${height}),${width},-2)':'if(gt(a,${width}/${height}),-2,${height})',` +
+          `setsar=1,` +
+          `${colorFilterChain}` +
+          `scale=iw*${scaleX.toFixed(6)}:ih*${scaleY.toFixed(6)},` +
+          `format=rgba,` +
+          `rotate=${rotationRad.toFixed(8)}:ow=rotw(iw):oh=roth(ih):c=none,` +
+          `colorchannelmixer=aa=${clamp01(seg.opacity)}[${vLabel}]`,
+      );
+    } else if (seg.generator?.kind === 'black-video' || seg.generator?.kind === 'color-matte') {
+      const colorHex =
+        seg.generator.kind === 'color-matte'
+          ? (seg.generator.color ?? '#000000')
+          : '#000000';
+      const ffColor = /^#[0-9a-fA-F]{6}$/.test(colorHex) ? `0x${colorHex.slice(1)}` : 'black';
+      filterParts.push(
+        `color=c=${ffColor}:s=${width}x${height}:r=${fps}:d=${durSec},` +
+          `${colorFilterChain}` +
+          `scale=iw*${scaleX.toFixed(6)}:ih*${scaleY.toFixed(6)},` +
+          `format=rgba,` +
+          `rotate=${rotationRad.toFixed(8)}:ow=rotw(iw):oh=roth(ih):c=none,` +
+          `colorchannelmixer=aa=${clamp01(seg.opacity)}[${vLabel}]`,
+      );
+    } else {
+      continue;
+    }
+
+    if (blendMode === 'silhouette-alpha' || blendMode === 'silhouette-luma') {
+      throw new Error(`Export blend mode '${blendMode}' is not supported yet in FFmpeg pipeline.`);
+    }
+
+    if (blendMode === 'normal') {
+      filterParts.push(
+        `[${lastOverlay}][${vLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${ovLabel}]`,
+      );
+    } else {
+      const segBase = `segbase${i}`;
+      const segPos = `segpos${i}`;
+      const ffBlendMode =
+        blendMode === 'add'
+          ? 'addition'
+          : blendMode === 'multiply'
+            ? 'multiply'
+            : blendMode === 'screen'
+              ? 'screen'
+              : 'overlay';
+
+      filterParts.push(`color=c=black@0:s=${width}x${height}:r=${fps}:d=${totalDurationSec}[${segBase}]`);
+      filterParts.push(
+        `[${segBase}][${vLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${segPos}]`,
+      );
+      filterParts.push(`[${lastOverlay}][${segPos}]blend=all_mode=${ffBlendMode}[${ovLabel}]`);
+    }
 
     lastOverlay = ovLabel;
   }
@@ -543,6 +622,33 @@ function extractSegments(sequence: Sequence): {
       const end = Math.max(start, clip.startTime.frames + clip.duration.frames);
       boundaries.add(start);
       boundaries.add(end);
+
+      if (clip.transitionIn) {
+        const tDur = Math.max(0, clip.transitionIn.duration.frames);
+        for (let f = 1; f < tDur; f++) {
+          boundaries.add(start + f);
+        }
+      }
+      if (clip.transitionOut) {
+        const tDur = Math.max(0, clip.transitionOut.duration.frames);
+        const outStart = Math.max(start, end - tDur);
+        for (let f = outStart + 1; f < end; f++) {
+          boundaries.add(f);
+        }
+      }
+
+      const sortedKfs = [...clip.keyframes].sort((a, b) => a.time.frames - b.time.frames);
+      if (sortedKfs.length > 1) {
+        const kStart = Math.max(0, sortedKfs[0].time.frames);
+        const kEnd = Math.min(clip.duration.frames, sortedKfs[sortedKfs.length - 1].time.frames);
+        for (let f = kStart; f <= kEnd; f++) {
+          boundaries.add(start + f);
+        }
+      } else {
+        for (const kf of sortedKfs) {
+          boundaries.add(start + Math.max(0, kf.time.frames));
+        }
+      }
     }
   }
 
@@ -560,19 +666,28 @@ function extractSegments(sequence: Sequence): {
     const plan = buildCompositionPlan(sequence, time);
 
     for (const layer of plan.videoLayers) {
-      if (!layer.mediaAssetId) continue;
+      if (!layer.mediaAssetId && !layer.generator) continue;
       const z = videoTrackOrder.get(layer.trackId) ?? 0;
-      const opacity = clamp01(layer.opacity);
+      const transitionOpacity = resolveTransitionOpacityMultiplier(
+        layer.transitionType,
+        layer.transitionProgress,
+        layer.transitionPhase,
+      );
+      const opacity = clamp01(layer.opacity * transitionOpacity);
       const positionX = round3(layer.transform.positionX);
       const positionY = round3(layer.transform.positionY);
       const scaleX = round4(layer.transform.scaleX);
       const scaleY = round4(layer.transform.scaleY);
       const rotation = round3(layer.transform.rotation);
       const blendMode = layer.blendMode;
+      const generatorKey = layer.generator
+        ? `${layer.generator.kind}:${layer.generator.color ?? ''}`
+        : 'none';
       const key = [
         layer.clipId,
         layer.trackId,
-        layer.mediaAssetId,
+        layer.mediaAssetId ?? 'none',
+        generatorKey,
         z,
         opacity.toFixed(4),
         blendMode,
@@ -587,22 +702,21 @@ function extractSegments(sequence: Sequence): {
       const expectedSourceFrame = prev
         ? prev.sourceStartFrame + (prev.endFrame - prev.startFrame)
         : -1;
+      const isSequentialSource =
+        layer.mediaAssetId != null && expectedSourceFrame === layer.sourceTime.frames;
 
-      if (
-        prev &&
-        prev.endFrame === frameStart &&
-        expectedSourceFrame === layer.sourceTime.frames
-      ) {
+      if (prev && prev.endFrame === frameStart && (layer.mediaAssetId == null || isSequentialSource)) {
         prev.endFrame = frameEnd;
       } else {
         const seg: VideoSegment = {
           clipId: layer.clipId,
           trackId: layer.trackId,
           mediaAssetId: layer.mediaAssetId,
+          generator: layer.generator ?? null,
           z,
           startFrame: frameStart,
           endFrame: frameEnd,
-          sourceStartFrame: layer.sourceTime.frames,
+          sourceStartFrame: layer.mediaAssetId ? layer.sourceTime.frames : 0,
           opacity,
           blendMode,
           positionX,
@@ -618,11 +732,18 @@ function extractSegments(sequence: Sequence): {
 
     for (const source of plan.audioSources) {
       if (!source.mediaAssetId) continue;
+      const transitionGain = resolveTransitionAudioGain(
+        source.transitionType,
+        source.transitionProgress,
+        source.transitionPhase,
+        source.transitionAudioCrossfade,
+      );
+      const gain = source.gain * transitionGain;
       const key = [
         source.clipId,
         source.trackId,
         source.mediaAssetId,
-        source.gain.toFixed(4),
+        gain.toFixed(4),
         source.pan.left.toFixed(4),
         source.pan.right.toFixed(4),
       ].join('|');
@@ -646,7 +767,7 @@ function extractSegments(sequence: Sequence): {
           startFrame: frameStart,
           endFrame: frameEnd,
           sourceStartFrame: source.sourceTime.frames,
-          gain: source.gain,
+          gain,
           panLeft: source.pan.left,
           panRight: source.pan.right,
         };
@@ -707,6 +828,102 @@ function adaptStoredSequenceToCore(
   };
 }
 
+function normalizeStoredTransitionType(raw: unknown): 'cross-dissolve' | 'fade-black' {
+  if (raw === 'fade-black') return 'fade-black';
+  if (raw === 'cross-dissolve') return 'cross-dissolve';
+  if (raw === 'dissolve' || raw === 'wipe-left' || raw === 'wipe-right') {
+    return 'cross-dissolve';
+  }
+  return 'cross-dissolve';
+}
+
+function adaptStoredTransition(
+  transition: StoredClipData['transitionIn'],
+  rate: FrameRate,
+): ClipItem['transitionIn'] {
+  if (!transition) return null;
+  const durationFrames = Math.max(
+    0,
+    Math.round(
+      typeof transition.durationFrames === 'number'
+        ? transition.durationFrames
+        : typeof transition.duration?.frames === 'number'
+          ? transition.duration.frames
+          : 0,
+    ),
+  );
+  if (durationFrames <= 0) return null;
+  const type = normalizeStoredTransitionType(transition.type);
+  return {
+    id: typeof transition.id === 'string' && transition.id.length > 0 ? transition.id : nanoid(12),
+    type,
+    duration: framesToTimeValue(durationFrames, rate),
+    audioCrossfade:
+      typeof transition.audioCrossfade === 'boolean'
+        ? transition.audioCrossfade
+        : type === 'cross-dissolve',
+  };
+}
+
+function adaptStoredKeyframes(clip: StoredClipData, rate: FrameRate): ClipItem['keyframes'] {
+  if (!Array.isArray(clip.keyframes)) return [];
+  const keyframes: ClipItem['keyframes'] = [];
+  for (const kf of clip.keyframes) {
+    if (!kf || typeof kf !== 'object') continue;
+    if (typeof kf.property !== 'string' || typeof kf.value !== 'number') continue;
+    const frame = Math.max(
+      0,
+      Math.round(
+        typeof kf.frame === 'number'
+          ? kf.frame
+          : typeof kf.time?.frames === 'number'
+            ? kf.time.frames
+            : 0,
+      ),
+    );
+    const easing =
+      kf.easing === 'linear' ||
+      kf.easing === 'ease-in' ||
+      kf.easing === 'ease-out' ||
+      kf.easing === 'ease-in-out' ||
+      kf.easing === 'bezier'
+        ? kf.easing
+        : 'linear';
+    keyframes.push({
+      id: typeof kf.id === 'string' && kf.id.length > 0 ? kf.id : nanoid(12),
+      clipId: clip.id,
+      property: kf.property as ClipItem['keyframes'][number]['property'],
+      time: framesToTimeValue(frame, rate),
+      value: kf.value,
+      easing,
+      bezierHandles: kf.bezierHandles,
+    });
+  }
+  keyframes.sort((a, b) => a.time.frames - b.time.frames);
+  return keyframes;
+}
+
+function adaptStoredGenerator(generator: StoredClipData['generator']): ClipItem['generator'] {
+  if (!generator || typeof generator !== 'object') return null;
+  if (
+    generator.kind !== 'black-video' &&
+    generator.kind !== 'color-matte' &&
+    generator.kind !== 'adjustment-layer'
+  ) {
+    return null;
+  }
+  if (generator.kind === 'color-matte') {
+    return {
+      kind: 'color-matte',
+      color:
+        typeof generator.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(generator.color)
+          ? generator.color
+          : '#000000',
+    };
+  }
+  return { kind: generator.kind };
+}
+
 function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameRate): ClipItem[] {
   const coreClips = clips.map((clip) => {
     const startTime = clip.startTime ?? framesToTimeValue(clip.startFrame ?? 0, rate);
@@ -749,10 +966,14 @@ function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameR
       },
       opacity: clip.opacity ?? 1,
       blendMode: clip.blendMode ?? 'normal',
-      keyframes: [],
-      transitionIn: null,
-      transitionOut: null,
+      blendParams: {
+        silhouetteGamma: clip.blendParams?.silhouetteGamma ?? 1,
+      },
+      keyframes: adaptStoredKeyframes(clip, rate),
+      transitionIn: adaptStoredTransition(clip.transitionIn, rate),
+      transitionOut: adaptStoredTransition(clip.transitionOut, rate),
       masks: [],
+      generator: adaptStoredGenerator(clip.generator),
       disabled: clip.disabled ?? false,
     };
   });
@@ -875,6 +1096,32 @@ function framesToTimeValue(frames: number, rate: FrameRate): TimeValue {
 function framesToSeconds(frames: number, rate: FrameRate): number {
   if (rate.num === 0) return 0;
   return frames / (rate.num / rate.den);
+}
+
+function resolveTransitionOpacityMultiplier(
+  type: string | null,
+  progress: number | null,
+  phase: 'in' | 'out' | null,
+): number {
+  if (!type || progress == null || !phase) return 1;
+  const t = clamp01(progress);
+  if (type === 'cross-dissolve' || type === 'fade-black' || type === 'dissolve') {
+    return phase === 'in' ? t : 1 - t;
+  }
+  return 1;
+}
+
+function resolveTransitionAudioGain(
+  type: string | null,
+  progress: number | null,
+  phase: 'in' | 'out' | null,
+  audioCrossfade: boolean,
+): number {
+  if (!audioCrossfade || type !== 'cross-dissolve' || progress == null || !phase) {
+    return 1;
+  }
+  const t = clamp01(progress);
+  return phase === 'in' ? Math.sin((t * Math.PI) / 2) : Math.cos((t * Math.PI) / 2);
 }
 
 function clamp01(value: number): number {

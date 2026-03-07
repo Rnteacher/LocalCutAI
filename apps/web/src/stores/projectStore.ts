@@ -17,6 +17,80 @@ import type { ApiProject, ApiMediaAsset, ApiSequence } from '../lib/api.js';
 // ---------------------------------------------------------------------------
 
 /** Shape of a clip in the sequence JSON data */
+export type TimelineBlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'add'
+  | 'silhouette-alpha'
+  | 'silhouette-luma';
+
+export type TimelineTransitionType = 'cross-dissolve' | 'fade-black';
+
+export interface TransitionData {
+  id: string;
+  type: TimelineTransitionType;
+  durationFrames: number;
+  audioCrossfade?: boolean;
+}
+
+export interface TimelineKeyframeData {
+  id: string;
+  property:
+    | 'opacity'
+    | 'transform.positionX'
+    | 'transform.positionY'
+    | 'transform.scaleX'
+    | 'transform.scaleY'
+    | 'transform.rotation'
+    | 'transform.anchorX'
+    | 'transform.anchorY'
+    | 'mask.opacity'
+    | 'mask.feather'
+    | 'mask.expansion';
+  frame: number;
+  value: number;
+  easing: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'bezier';
+  bezierHandles?: { inX: number; inY: number; outX: number; outY: number };
+}
+
+export interface MaskPoint {
+  x: number;
+  y: number;
+  inX: number;
+  inY: number;
+  outX: number;
+  outY: number;
+}
+
+export interface MaskShapeKeyframe {
+  id: string;
+  frame: number;
+  points: MaskPoint[];
+}
+
+export interface ManualMaskData {
+  id: string;
+  name: string;
+  mode: 'add' | 'subtract' | 'intersect';
+  closed: boolean;
+  invert: boolean;
+  opacity: number;
+  feather: number;
+  expansion: number;
+  keyframes: MaskShapeKeyframe[];
+}
+
+export interface GeneratorData {
+  kind: 'black-video' | 'color-matte' | 'adjustment-layer';
+  color?: string;
+}
+
+export interface ClipBlendParams {
+  silhouetteGamma?: number;
+}
+
 export interface TimelineClipData {
   id: string;
   name: string;
@@ -56,6 +130,13 @@ export interface TimelineClipData {
   saturation?: number; // default 1
   hue?: number; // default 0 (deg)
   vignette?: number; // default 0 (-1..1, bright..dark)
+  blendMode?: TimelineBlendMode;
+  blendParams?: ClipBlendParams;
+  keyframes?: TimelineKeyframeData[];
+  transitionIn?: TransitionData | null;
+  transitionOut?: TransitionData | null;
+  masks?: ManualMaskData[];
+  generator?: GeneratorData | null;
   linkedClipId?: string;
 }
 
@@ -170,6 +251,14 @@ interface ProjectState {
     insertMode?: 'overwrite' | 'ripple';
     audioOnly?: boolean;
   }) => Promise<void>;
+  addGeneratorClip: (params: {
+    trackId: string;
+    generator: GeneratorData;
+    name?: string;
+    startFrame: number;
+    durationFrames?: number;
+    insertMode?: 'overwrite' | 'ripple';
+  }) => Promise<void>;
   addTrack: (type: 'video' | 'audio') => Promise<string | null>;
   removeClips: (clipIds: string[]) => Promise<void>;
   moveClip: (
@@ -188,6 +277,26 @@ interface ProjectState {
   // Milestone 2 actions
   splitClipAtPlayhead: (clipId: string, frame: number) => Promise<void>;
   updateClipProperties: (clipId: string, props: Partial<TimelineClipData>) => Promise<void>;
+  upsertClipKeyframe: (clipId: string, keyframe: TimelineKeyframeData) => Promise<void>;
+  removeClipKeyframe: (clipId: string, keyframeId: string) => Promise<void>;
+  setClipTransition: (
+    clipId: string,
+    side: 'in' | 'out',
+    transition: TransitionData | null,
+  ) => Promise<void>;
+  addClipMask: (clipId: string, mask: ManualMaskData) => Promise<void>;
+  updateClipMask: (
+    clipId: string,
+    maskId: string,
+    patch: Partial<Omit<ManualMaskData, 'id'>>,
+  ) => Promise<void>;
+  removeClipMask: (clipId: string, maskId: string) => Promise<void>;
+  upsertMaskShapeKeyframe: (
+    clipId: string,
+    maskId: string,
+    keyframe: MaskShapeKeyframe,
+  ) => Promise<void>;
+  removeMaskShapeKeyframe: (clipId: string, maskId: string, keyframeId: string) => Promise<void>;
   rippleTrimClip: (
     clipId: string,
     newStartFrame: number,
@@ -247,6 +356,176 @@ function generateId(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
 }
 
+function normalizeTransitionType(raw: unknown): TimelineTransitionType {
+  if (raw === 'cross-dissolve' || raw === 'fade-black') {
+    return raw;
+  }
+  if (raw === 'dissolve' || raw === 'wipe-left' || raw === 'wipe-right') {
+    return 'cross-dissolve';
+  }
+  return 'cross-dissolve';
+}
+
+function normalizeTransition(raw: unknown): TransitionData | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as {
+    id?: unknown;
+    type?: unknown;
+    durationFrames?: unknown;
+    duration?: { frames?: unknown };
+    audioCrossfade?: unknown;
+  };
+  const durationFramesRaw =
+    typeof obj.durationFrames === 'number'
+      ? obj.durationFrames
+      : typeof obj.duration?.frames === 'number'
+        ? obj.duration.frames
+        : 0;
+  const durationFrames = Math.max(0, Math.round(durationFramesRaw));
+  if (durationFrames <= 0) return null;
+  const type = normalizeTransitionType(obj.type);
+  return {
+    id: typeof obj.id === 'string' && obj.id.trim().length > 0 ? obj.id : generateId(),
+    type,
+    durationFrames,
+    audioCrossfade:
+      typeof obj.audioCrossfade === 'boolean'
+        ? obj.audioCrossfade
+        : type === 'cross-dissolve'
+          ? true
+          : false,
+  };
+}
+
+function normalizeKeyframes(raw: unknown): TimelineKeyframeData[] {
+  if (!Array.isArray(raw)) return [];
+  const normalized: TimelineKeyframeData[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const kf = item as Partial<TimelineKeyframeData> & { time?: { frames?: number } };
+    const frame = Math.max(
+      0,
+      Math.round(
+        typeof kf.frame === 'number' ? kf.frame : typeof kf.time?.frames === 'number' ? kf.time.frames : 0,
+      ),
+    );
+    if (typeof kf.property !== 'string' || typeof kf.value !== 'number') continue;
+    const easing =
+      kf.easing === 'linear' ||
+      kf.easing === 'ease-in' ||
+      kf.easing === 'ease-out' ||
+      kf.easing === 'ease-in-out' ||
+      kf.easing === 'bezier'
+        ? kf.easing
+        : 'linear';
+    normalized.push({
+      id: typeof kf.id === 'string' && kf.id.trim().length > 0 ? kf.id : generateId(),
+      property: kf.property as TimelineKeyframeData['property'],
+      frame,
+      value: kf.value,
+      easing,
+      bezierHandles: kf.bezierHandles,
+    });
+  }
+  normalized.sort((a, b) => a.frame - b.frame);
+  return normalized;
+}
+
+function normalizeMasks(raw: unknown): ManualMaskData[] {
+  if (!Array.isArray(raw)) return [];
+  const masks: ManualMaskData[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const m = item as Partial<ManualMaskData>;
+    const keyframesRaw = Array.isArray(m.keyframes) ? m.keyframes : [];
+    const keyframes: MaskShapeKeyframe[] = [];
+    for (const kItem of keyframesRaw) {
+      if (!kItem || typeof kItem !== 'object') continue;
+      const k = kItem as Partial<MaskShapeKeyframe>;
+      const pointsRaw = Array.isArray(k.points) ? k.points : [];
+      const points: MaskPoint[] = pointsRaw
+        .map((p) => {
+          if (!p || typeof p !== 'object') return null;
+          const point = p as Partial<MaskPoint>;
+          const x = typeof point.x === 'number' ? point.x : 0;
+          const y = typeof point.y === 'number' ? point.y : 0;
+          return {
+            x,
+            y,
+            inX: typeof point.inX === 'number' ? point.inX : x,
+            inY: typeof point.inY === 'number' ? point.inY : y,
+            outX: typeof point.outX === 'number' ? point.outX : x,
+            outY: typeof point.outY === 'number' ? point.outY : y,
+          };
+        })
+        .filter((p): p is MaskPoint => p != null);
+
+      keyframes.push({
+        id: typeof k.id === 'string' && k.id.trim().length > 0 ? k.id : generateId(),
+        frame: Math.max(0, Math.round(typeof k.frame === 'number' ? k.frame : 0)),
+        points,
+      });
+    }
+    keyframes.sort((a, b) => a.frame - b.frame);
+    masks.push({
+      id: typeof m.id === 'string' && m.id.trim().length > 0 ? m.id : generateId(),
+      name: typeof m.name === 'string' && m.name.trim().length > 0 ? m.name : 'Mask',
+      mode: m.mode === 'subtract' || m.mode === 'intersect' ? m.mode : 'add',
+      closed: m.closed !== false,
+      invert: m.invert === true,
+      opacity:
+        typeof m.opacity === 'number'
+          ? Math.max(0, Math.min(1, m.opacity))
+          : 1,
+      feather:
+        typeof m.feather === 'number'
+          ? Math.max(0, m.feather)
+          : 0,
+      expansion:
+        typeof m.expansion === 'number'
+          ? m.expansion
+          : 0,
+      keyframes,
+    });
+  }
+  return masks;
+}
+
+function normalizeGenerator(raw: unknown): GeneratorData | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const generator = raw as Partial<GeneratorData>;
+  if (
+    generator.kind !== 'black-video' &&
+    generator.kind !== 'color-matte' &&
+    generator.kind !== 'adjustment-layer'
+  ) {
+    return null;
+  }
+  if (generator.kind === 'color-matte') {
+    const color =
+      typeof generator.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(generator.color)
+        ? generator.color
+        : '#000000';
+    return { kind: 'color-matte', color };
+  }
+  return { kind: generator.kind };
+}
+
+function normalizeClip(clip: TimelineClipData): TimelineClipData {
+  return {
+    ...clip,
+    blendMode: clip.blendMode ?? 'normal',
+    blendParams: {
+      silhouetteGamma: clip.blendParams?.silhouetteGamma ?? 1,
+    },
+    keyframes: normalizeKeyframes(clip.keyframes),
+    transitionIn: normalizeTransition(clip.transitionIn),
+    transitionOut: normalizeTransition(clip.transitionOut),
+    masks: normalizeMasks(clip.masks),
+    generator: normalizeGenerator(clip.generator),
+  };
+}
+
 function getSeqData(seq: ApiSequence): SequenceData {
   const raw = seq.data as unknown;
   if (!raw || typeof raw !== 'object') {
@@ -254,7 +533,29 @@ function getSeqData(seq: ApiSequence): SequenceData {
   }
 
   const data = raw as { tracks?: unknown; frameRate?: { num: number; den: number } };
-  const tracks = Array.isArray(data.tracks) ? (data.tracks as TimelineTrackData[]) : [];
+  const tracksRaw = Array.isArray(data.tracks) ? (data.tracks as TimelineTrackData[]) : [];
+  const tracks = tracksRaw.map((t, i) => {
+    const channelMode: 'stereo' | 'mono' = t.channelMode === 'mono' ? 'mono' : 'stereo';
+    const channelMap: 'L+R' | 'L' | 'R' =
+      t.channelMap === 'L' || t.channelMap === 'R' || t.channelMap === 'L+R'
+        ? t.channelMap
+        : 'L+R';
+    return {
+      ...t,
+      sequenceId: t.sequenceId ?? seq.id,
+      locked: t.locked ?? false,
+      syncLocked: t.syncLocked ?? true,
+      visible: t.visible ?? true,
+      muted: t.muted ?? false,
+      solo: t.solo ?? false,
+      volume: typeof t.volume === 'number' ? t.volume : 1,
+      pan: typeof t.pan === 'number' ? t.pan : 0,
+      channelMode,
+      channelMap,
+      index: Number.isFinite(t.index) ? t.index : i,
+      clips: (Array.isArray(t.clips) ? t.clips : []).map(normalizeClip),
+    };
+  });
   return {
     ...data,
     tracks,
@@ -262,7 +563,24 @@ function getSeqData(seq: ApiSequence): SequenceData {
 }
 
 function cloneClip(clip: TimelineClipData): TimelineClipData {
-  return { ...clip };
+  return {
+    ...clip,
+    blendParams: clip.blendParams ? { ...clip.blendParams } : undefined,
+    keyframes: (clip.keyframes ?? []).map((kf) => ({
+      ...kf,
+      bezierHandles: kf.bezierHandles ? { ...kf.bezierHandles } : undefined,
+    })),
+    transitionIn: clip.transitionIn ? { ...clip.transitionIn } : null,
+    transitionOut: clip.transitionOut ? { ...clip.transitionOut } : null,
+    masks: (clip.masks ?? []).map((mask) => ({
+      ...mask,
+      keyframes: mask.keyframes.map((kf) => ({
+        ...kf,
+        points: kf.points.map((p) => ({ ...p })),
+      })),
+    })),
+    generator: clip.generator ? { ...clip.generator } : null,
+  };
 }
 
 function overwriteTrackWithClip(
@@ -1085,6 +1403,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       pan: 0,
       audioVolume: 1,
       audioPan: 0,
+      blendMode: 'normal',
+      blendParams: { silhouetteGamma: 1 },
+      keyframes: [],
+      transitionIn: null,
+      transitionOut: null,
+      masks: [],
+      generator: null,
     };
 
     const updatedTracks = data.tracks.map((t) => {
@@ -1128,6 +1453,87 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     const updatedData = { ...data, tracks: updatedTracks };
 
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  addGeneratorClip: async ({
+    trackId,
+    generator,
+    name,
+    startFrame,
+    durationFrames = 120,
+    insertMode = 'overwrite',
+  }) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+
+    const data = getSeqData(seq);
+    let track = data.tracks.find((t) => t.id === trackId && t.type === 'video' && !t.locked);
+    if (!track) {
+      track = data.tracks.find((t) => t.type === 'video' && !t.locked);
+    }
+    if (!track) return;
+
+    const clipName =
+      name ??
+      (generator.kind === 'black-video'
+        ? 'Black Video'
+        : generator.kind === 'color-matte'
+          ? 'Color Matte'
+          : 'Adjustment Layer');
+
+    const newClip: TimelineClipData = {
+      id: generateId(),
+      name: clipName,
+      type: 'video',
+      startFrame: Math.max(0, Math.round(startFrame)),
+      durationFrames: Math.max(1, Math.round(durationFrames)),
+      mediaAssetId: null,
+      sourceInFrame: 0,
+      sourceOutFrame: Math.max(1, Math.round(durationFrames)),
+      opacity: 1,
+      positionX: 0,
+      positionY: 0,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      brightness: 1,
+      contrast: 1,
+      saturation: 1,
+      hue: 0,
+      vignette: 0,
+      blendMode: 'normal',
+      blendParams: { silhouetteGamma: 1 },
+      keyframes: [],
+      transitionIn: null,
+      transitionOut: null,
+      masks: [],
+      generator,
+    };
+
+    const updatedTracks = data.tracks.map((t) => {
+      if (t.id !== track.id) return t;
+      return {
+        ...t,
+        clips:
+          insertMode === 'ripple'
+            ? rippleInsertTrackWithClip(t.clips, newClip)
+            : overwriteTrackWithClip(t.clips, newClip),
+      };
+    });
+
+    const updatedData = { ...data, tracks: updatedTracks };
     try {
       const updatedSeq = await enqueueSequenceUpdate(seq.id, {
         data: updatedData as Record<string, unknown>,
@@ -1523,6 +1929,316 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         // A newer slider update already replaced this state; ignore stale completion.
         return;
       }
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  upsertClipKeyframe: async (clipId: string, keyframe: TimelineKeyframeData) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const normalized: TimelineKeyframeData = {
+      ...keyframe,
+      frame: Math.max(0, Math.round(keyframe.frame)),
+    };
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const prev = c.keyframes ?? [];
+        const filtered = prev.filter(
+          (kf) => !(kf.id === normalized.id || (kf.property === normalized.property && kf.frame === normalized.frame)),
+        );
+        const keyframes = [...filtered, normalized].sort((a, b) => a.frame - b.frame);
+        return { ...c, keyframes };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  removeClipKeyframe: async (clipId: string, keyframeId: string) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        return {
+          ...c,
+          keyframes: (c.keyframes ?? []).filter((kf) => kf.id !== keyframeId),
+        };
+      }),
+    }));
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  setClipTransition: async (clipId: string, side: 'in' | 'out', transition: TransitionData | null) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const normalized = transition
+      ? {
+          ...transition,
+          durationFrames: Math.max(1, Math.round(transition.durationFrames)),
+          type: normalizeTransitionType(transition.type),
+          audioCrossfade:
+            transition.audioCrossfade ??
+            (normalizeTransitionType(transition.type) === 'cross-dissolve'),
+        }
+      : null;
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        return side === 'in'
+          ? { ...c, transitionIn: normalized }
+          : { ...c, transitionOut: normalized };
+      }),
+    }));
+    const updatedData = { ...data, tracks: updatedTracks };
+
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  addClipMask: async (clipId: string, mask: ManualMaskData) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const normalizedIncoming = normalizeMasks([mask])[0];
+    if (!normalizedIncoming) return;
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = [...(c.masks ?? []), normalizedIncoming];
+        return { ...c, masks };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  updateClipMask: async (
+    clipId: string,
+    maskId: string,
+    patch: Partial<Omit<ManualMaskData, 'id'>>,
+  ) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = (c.masks ?? []).map((m) => {
+          if (m.id !== maskId) return m;
+          const merged: ManualMaskData = {
+            ...m,
+            ...patch,
+            id: m.id,
+            keyframes:
+              patch.keyframes != null
+                ? patch.keyframes.map((kf) => ({
+                    ...kf,
+                    frame: Math.max(0, Math.round(kf.frame)),
+                    points: kf.points.map((p) => ({
+                      x: p.x,
+                      y: p.y,
+                      inX: p.inX,
+                      inY: p.inY,
+                      outX: p.outX,
+                      outY: p.outY,
+                    })),
+                  }))
+                : m.keyframes,
+          };
+          return normalizeMasks([merged])[0] ?? merged;
+        });
+        return { ...c, masks };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  removeClipMask: async (clipId: string, maskId: string) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        return { ...c, masks: (c.masks ?? []).filter((m) => m.id !== maskId) };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  upsertMaskShapeKeyframe: async (clipId: string, maskId: string, keyframe: MaskShapeKeyframe) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const normalizedKeyframe: MaskShapeKeyframe = {
+      ...keyframe,
+      frame: Math.max(0, Math.round(keyframe.frame)),
+      points: keyframe.points.map((p) => ({
+        x: p.x,
+        y: p.y,
+        inX: p.inX,
+        inY: p.inY,
+        outX: p.outX,
+        outY: p.outY,
+      })),
+    };
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = (c.masks ?? []).map((m) => {
+          if (m.id !== maskId) return m;
+          const prev = m.keyframes ?? [];
+          const filtered = prev.filter(
+            (kf) => !(kf.id === normalizedKeyframe.id || kf.frame === normalizedKeyframe.frame),
+          );
+          const keyframes = [...filtered, normalizedKeyframe].sort((a, b) => a.frame - b.frame);
+          return { ...m, keyframes };
+        });
+        return { ...c, masks };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  removeMaskShapeKeyframe: async (clipId: string, maskId: string, keyframeId: string) => {
+    const seq = get().sequences[0];
+    if (!seq) return;
+
+    get()._pushHistory();
+    const data = getSeqData(seq);
+
+    const updatedTracks = data.tracks.map((t) => ({
+      ...t,
+      clips: t.clips.map((c) => {
+        if (c.id !== clipId) return c;
+        const masks = (c.masks ?? []).map((m) => {
+          if (m.id !== maskId) return m;
+          return {
+            ...m,
+            keyframes: (m.keyframes ?? []).filter((kf) => kf.id !== keyframeId),
+          };
+        });
+        return { ...c, masks };
+      }),
+    }));
+
+    const updatedData = { ...data, tracks: updatedTracks };
+    try {
+      const updatedSeq = await enqueueSequenceUpdate(seq.id, {
+        data: updatedData as Record<string, unknown>,
+      });
+      set((s) => ({
+        sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
+      }));
     } catch (err) {
       set({ error: (err as Error).message });
     }

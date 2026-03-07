@@ -422,6 +422,107 @@ describe('ExportService hardening', () => {
     ).toThrow('Codec copy is not supported for timeline exports that require filtering.');
   });
 });
+
+describe('ExportService new timeline model support', () => {
+  it('maps legacy dissolve transition to cross-dissolve and preserves keyframes', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-new-model',
+      projectId: 'proj1',
+      name: 'Sequence model',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 48,
+              sourceInFrame: 0,
+              transitionIn: { id: 'tr1', type: 'dissolve', durationFrames: 12 },
+              keyframes: [
+                { id: 'k1', property: 'transform.positionX', frame: 0, value: 0, easing: 'linear' },
+                { id: 'k2', property: 'transform.positionX', frame: 12, value: 200, easing: 'linear' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const clip = sequence.tracks[0].clips[0];
+    expect(clip.transitionIn?.type).toBe('cross-dissolve');
+    expect(clip.keyframes.length).toBe(2);
+    expect(clip.keyframes[1].time.frames).toBe(12);
+  });
+
+  it('builds ffmpeg args for color matte generator segments', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-generator',
+      projectId: 'proj1',
+      name: 'Sequence generator',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'g1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              generator: { kind: 'color-matte', color: '#ff0000' },
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map(),
+      1,
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('color=c=0xff0000');
+  });
+});
 describe('TimeValue to seconds conversion', () => {
   // Test the inline timeToSeconds logic by computing expected values
   function timeToSeconds(tv: { frames: number; rate: { num: number; den: number } }): number {

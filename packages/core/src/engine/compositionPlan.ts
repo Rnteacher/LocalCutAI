@@ -42,12 +42,15 @@ export interface VideoLayer {
   /** Fully resolved opacity (after keyframe evaluation), clamped to [0, 1]. */
   opacity: number;
   blendMode: BlendMode;
+  generator: ReturnType<typeof resolveActiveClips>[number]['clip']['generator'];
   /**
    * Progress through a transition in [0, 1], or `null` if no transition is
    * active for this clip at this time.
    */
   transitionProgress: number | null;
   transitionType: TransitionType | null;
+  transitionPhase: 'in' | 'out' | null;
+  transitionAudioCrossfade: boolean;
 }
 
 /**
@@ -63,6 +66,10 @@ export interface AudioSource {
   gain: number;
   /** Stereo pan coefficients. */
   pan: { left: number; right: number };
+  transitionProgress: number | null;
+  transitionType: TransitionType | null;
+  transitionPhase: 'in' | 'out' | null;
+  transitionAudioCrossfade: boolean;
 }
 
 /**
@@ -93,7 +100,12 @@ export interface CompositionPlan {
 function resolveTransition(
   clip: ReturnType<typeof resolveActiveClips>[number]['clip'],
   localTimeSec: number,
-): { progress: number; type: TransitionType } | null {
+): {
+  progress: number;
+  type: TransitionType;
+  phase: 'in' | 'out';
+  audioCrossfade: boolean;
+} | null {
   const durationSec = timeValueToSeconds(clip.duration);
 
   // Transition in.
@@ -102,7 +114,9 @@ function resolveTransition(
     if (localTimeSec < tDur && tDur > 0) {
       return {
         progress: localTimeSec / tDur,
-        type: clip.transitionIn.type,
+        type: normalizeTransitionType(clip.transitionIn.type),
+        phase: 'in',
+        audioCrossfade: clip.transitionIn.audioCrossfade ?? true,
       };
     }
   }
@@ -114,12 +128,21 @@ function resolveTransition(
     if (localTimeSec >= outStart && tDur > 0) {
       return {
         progress: (localTimeSec - outStart) / tDur,
-        type: clip.transitionOut.type,
+        type: normalizeTransitionType(clip.transitionOut.type),
+        phase: 'out',
+        audioCrossfade: clip.transitionOut.audioCrossfade ?? true,
       };
     }
   }
 
   return null;
+}
+
+function normalizeTransitionType(type: string): TransitionType {
+  if (type === 'cross-dissolve' || type === 'fade-black') return type;
+  if (type === 'dissolve') return 'cross-dissolve';
+  if (type === 'wipe-left' || type === 'wipe-right') return 'cross-dissolve';
+  return 'cross-dissolve';
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +170,14 @@ export function buildCompositionPlan(
   for (const ac of activeClips) {
     const { clip, track, clipLocalTime, sourceTime } = ac;
     const localTimeSec = timeValueToSeconds(clipLocalTime);
+    const transition = resolveTransition(clip, localTimeSec);
 
     // ----- Video / image layers -------------------------------------------
-    if (clip.type === 'video' || clip.type === 'image') {
+    if (
+      (clip.type === 'video' || clip.type === 'image') &&
+      track.visible &&
+      !track.muted
+    ) {
       // Evaluate all animatable transform properties.
       const transform: TransformState = {
         positionX: getPropertyValue(clip, 'transform.positionX', clipLocalTime),
@@ -157,16 +185,14 @@ export function buildCompositionPlan(
         scaleX: getPropertyValue(clip, 'transform.scaleX', clipLocalTime),
         scaleY: getPropertyValue(clip, 'transform.scaleY', clipLocalTime),
         rotation: getPropertyValue(clip, 'transform.rotation', clipLocalTime),
-        anchorX: clip.transform.anchorX,
-        anchorY: clip.transform.anchorY,
+        anchorX: getPropertyValue(clip, 'transform.anchorX', clipLocalTime),
+        anchorY: getPropertyValue(clip, 'transform.anchorY', clipLocalTime),
       };
 
       const opacity = Math.max(
         0,
         Math.min(1, getPropertyValue(clip, 'opacity', clipLocalTime)),
       );
-
-      const transition = resolveTransition(clip, localTimeSec);
 
       videoLayers.push({
         clipId: clip.id,
@@ -176,8 +202,11 @@ export function buildCompositionPlan(
         transform,
         opacity,
         blendMode: clip.blendMode,
+        generator: clip.generator,
         transitionProgress: transition?.progress ?? null,
         transitionType: transition?.type ?? null,
+        transitionPhase: transition?.phase ?? null,
+        transitionAudioCrossfade: transition?.audioCrossfade ?? false,
       });
     }
 
@@ -200,6 +229,10 @@ export function buildCompositionPlan(
         sourceTime,
         gain,
         pan,
+        transitionProgress: transition?.progress ?? null,
+        transitionType: transition?.type ?? null,
+        transitionPhase: transition?.phase ?? null,
+        transitionAudioCrossfade: transition?.audioCrossfade ?? false,
       });
     }
   }

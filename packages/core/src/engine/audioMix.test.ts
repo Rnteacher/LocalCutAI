@@ -44,6 +44,7 @@ function makeClip(overrides: Partial<ClipItem> = {}): ClipItem {
     transitionIn: null,
     transitionOut: null,
     masks: [],
+    generator: null,
     disabled: false,
     ...overrides,
   };

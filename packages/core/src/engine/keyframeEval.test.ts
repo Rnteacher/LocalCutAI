@@ -59,6 +59,7 @@ function makeClip(keyframes: Keyframe[]): ClipItem {
     transitionIn: null,
     transitionOut: null,
     masks: [],
+    generator: null,
     disabled: false,
   };
 }

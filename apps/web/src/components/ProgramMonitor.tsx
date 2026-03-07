@@ -3,13 +3,28 @@ import type { MouseEvent as ReactMouseEvent } from 'react';
 import { usePlaybackStore } from '../stores/playbackStore.js';
 import { useProjectStore } from '../stores/projectStore.js';
 import { useSelectionStore } from '../stores/selectionStore.js';
-import type { TimelineClipData, TimelineTrackData } from '../stores/projectStore.js';
+import type { MaskPoint, TimelineClipData, TimelineTrackData } from '../stores/projectStore.js';
 import { api } from '../lib/api.js';
+import { adaptSequence } from '../lib/timelineAdapter.js';
+import { buildCompositionPlan } from '../lib/core.js';
 
 interface ActiveLayer {
   clip: TimelineClipData;
   trackIndex: number;
+  clipLocalFrame: number;
   sourceTimeSec: number;
+  opacity: number;
+  positionX: number;
+  positionY: number;
+  scaleX: number;
+  scaleY: number;
+  rotation: number;
+  anchorX: number;
+  anchorY: number;
+  blendMode: TimelineClipData['blendMode'];
+  transitionProgress: number | null;
+  transitionType: 'cross-dissolve' | 'fade-black' | null;
+  transitionPhase: 'in' | 'out' | null;
 }
 
 interface Rect {
@@ -44,42 +59,15 @@ function parseTimecodeToFrame(value: string, fps: number): number | null {
   return Math.max(0, frame);
 }
 
-function resolveActiveLayers(
-  tracks: TimelineTrackData[],
-  currentFrame: number,
-  fps: number,
-): ActiveLayer[] {
-  const active: ActiveLayer[] = [];
-  for (const track of tracks) {
-    if (track.type !== 'video' || track.muted || !track.visible) continue;
-    const clips = [...track.clips].sort((a, b) => a.startFrame - b.startFrame);
-    for (const clip of clips) {
-      const start = clip.startFrame;
-      const end = clip.startFrame + clip.durationFrames;
-      if (currentFrame < start || currentFrame >= end) continue;
-      if (!clip.mediaAssetId || (clip.type !== 'video' && clip.type !== 'image')) continue;
-      const sourceIn = clip.sourceInFrame ?? 0;
-      const sourceOut = clip.sourceOutFrame ?? sourceIn + clip.durationFrames;
-      const speed = clip.speed ?? 1;
-      const rel = currentFrame - start;
-      let sourceFrame: number;
-      if (speed >= 0) {
-        sourceFrame = sourceIn + rel * speed;
-      } else {
-        sourceFrame = sourceOut - 1 + rel * speed;
-      }
-      sourceFrame = Math.max(sourceIn, Math.min(sourceOut - 1, sourceFrame));
-      active.push({
-        clip,
-        trackIndex: track.index,
-        sourceTimeSec: sourceFrame / Math.max(1, fps),
-      });
-      break;
-    }
+function transitionOpacityMultiplier(layer: ActiveLayer): number {
+  if (!layer.transitionType || layer.transitionProgress == null || !layer.transitionPhase) {
+    return 1;
   }
-
-  active.sort((a, b) => b.trackIndex - a.trackIndex);
-  return active;
+  const t = Math.max(0, Math.min(1, layer.transitionProgress));
+  if (layer.transitionType === 'cross-dissolve' || layer.transitionType === 'fade-black') {
+    return layer.transitionPhase === 'in' ? t : 1 - t;
+  }
+  return 1;
 }
 
 function frameFitRect(
@@ -107,6 +95,317 @@ function safeScale(value: number): number {
   return value;
 }
 
+function blendModeToComposite(mode: TimelineClipData['blendMode']): GlobalCompositeOperation {
+  switch (mode) {
+    case 'multiply':
+      return 'multiply';
+    case 'screen':
+      return 'screen';
+    case 'overlay':
+      return 'overlay';
+    case 'add':
+      return 'lighter';
+    case 'silhouette-alpha':
+    case 'silhouette-luma':
+      return 'destination-out';
+    case 'normal':
+    default:
+      return 'source-over';
+  }
+}
+
+function resolveGeneratorColor(clip: TimelineClipData): string | null {
+  const generator = clip.generator;
+  if (!generator) return null;
+  if (generator.kind === 'black-video') return '#000000';
+  if (generator.kind === 'color-matte') {
+    if (typeof generator.color === 'string' && /^#[0-9a-fA-F]{6}$/.test(generator.color)) {
+      return generator.color;
+    }
+    return '#000000';
+  }
+  return null;
+}
+
+function applyEasingFactor(
+  t: number,
+  easing: NonNullable<TimelineClipData['keyframes']>[number]['easing'],
+): number {
+  const clamped = Math.max(0, Math.min(1, t));
+  switch (easing) {
+    case 'ease-in':
+      return clamped * clamped;
+    case 'ease-out':
+      return 1 - (1 - clamped) * (1 - clamped);
+    case 'ease-in-out':
+      return clamped < 0.5 ? 2 * clamped * clamped : 1 - 2 * (1 - clamped) * (1 - clamped);
+    case 'bezier':
+    case 'linear':
+    default:
+      return clamped;
+  }
+}
+
+function evaluateClipNumericKeyframe(
+  clip: TimelineClipData,
+  property: 'mask.opacity' | 'mask.feather' | 'mask.expansion',
+  clipLocalFrame: number,
+  defaultValue: number,
+): number {
+  const source = (clip.keyframes ?? [])
+    .filter((kf) => kf.property === property)
+    .sort((a, b) => a.frame - b.frame);
+  if (source.length === 0) return defaultValue;
+  if (source.length === 1) return source[0].value;
+  if (clipLocalFrame <= source[0].frame) return source[0].value;
+  const last = source[source.length - 1];
+  if (clipLocalFrame >= last.frame) return last.value;
+
+  for (let i = 0; i < source.length - 1; i++) {
+    const from = source[i];
+    const to = source[i + 1];
+    if (clipLocalFrame < from.frame || clipLocalFrame > to.frame) continue;
+    const span = Math.max(1, to.frame - from.frame);
+    const t = (clipLocalFrame - from.frame) / span;
+    const eased = applyEasingFactor(t, from.easing);
+    return from.value + (to.value - from.value) * eased;
+  }
+  return defaultValue;
+}
+
+function resolveMaskShapeAtFrame(
+  mask: NonNullable<TimelineClipData['masks']>[number],
+  clipLocalFrame: number,
+): MaskPoint[] {
+  const keyframes = [...(mask.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
+  if (keyframes.length === 0) return [];
+  if (keyframes.length === 1) {
+    return keyframes[0].points.map((p) => ({ ...p }));
+  }
+
+  const first = keyframes[0];
+  const last = keyframes[keyframes.length - 1];
+  if (clipLocalFrame <= first.frame) {
+    return first.points.map((p) => ({ ...p }));
+  }
+  if (clipLocalFrame >= last.frame) {
+    return last.points.map((p) => ({ ...p }));
+  }
+
+  for (let i = 0; i < keyframes.length - 1; i++) {
+    const a = keyframes[i];
+    const b = keyframes[i + 1];
+    if (clipLocalFrame < a.frame || clipLocalFrame > b.frame) continue;
+    const t = (clipLocalFrame - a.frame) / Math.max(1, b.frame - a.frame);
+    if (a.points.length !== b.points.length) {
+      return (t < 0.5 ? a.points : b.points).map((p) => ({ ...p }));
+    }
+    return a.points.map((ap, idx) => {
+      const bp = b.points[idx];
+      return {
+        x: ap.x + (bp.x - ap.x) * t,
+        y: ap.y + (bp.y - ap.y) * t,
+        inX: ap.inX + (bp.inX - ap.inX) * t,
+        inY: ap.inY + (bp.inY - ap.inY) * t,
+        outX: ap.outX + (bp.outX - ap.outX) * t,
+        outY: ap.outY + (bp.outY - ap.outY) * t,
+      };
+    });
+  }
+
+  return first.points.map((p) => ({ ...p }));
+}
+
+function drawMaskPath(
+  ctx: CanvasRenderingContext2D,
+  points: MaskPoint[],
+  options: {
+    drawX: number;
+    drawY: number;
+    drawWidth: number;
+    drawHeight: number;
+    sourceWidth: number;
+    sourceHeight: number;
+    closed: boolean;
+  },
+): void {
+  if (points.length < 2) return;
+  const normalized = points.every(
+    (p) =>
+      Math.abs(p.x) <= 1.5 &&
+      Math.abs(p.y) <= 1.5 &&
+      Math.abs(p.inX) <= 1.5 &&
+      Math.abs(p.inY) <= 1.5 &&
+      Math.abs(p.outX) <= 1.5 &&
+      Math.abs(p.outY) <= 1.5,
+  );
+  const srcW = Math.max(1, options.sourceWidth);
+  const srcH = Math.max(1, options.sourceHeight);
+  const mapX = (v: number) =>
+    options.drawX + (normalized ? v : v / srcW) * options.drawWidth;
+  const mapY = (v: number) =>
+    options.drawY + (normalized ? v : v / srcH) * options.drawHeight;
+
+  ctx.beginPath();
+  ctx.moveTo(mapX(points[0].x), mapY(points[0].y));
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    ctx.bezierCurveTo(
+      mapX(prev.outX),
+      mapY(prev.outY),
+      mapX(curr.inX),
+      mapY(curr.inY),
+      mapX(curr.x),
+      mapY(curr.y),
+    );
+  }
+  if (options.closed) {
+    const first = points[0];
+    const last = points[points.length - 1];
+    ctx.bezierCurveTo(
+      mapX(last.outX),
+      mapY(last.outY),
+      mapX(first.inX),
+      mapY(first.inY),
+      mapX(first.x),
+      mapY(first.y),
+    );
+    ctx.closePath();
+  }
+}
+
+function applyClipMasks(
+  layerCtx: CanvasRenderingContext2D,
+  maskCtx: CanvasRenderingContext2D,
+  layerClip: TimelineClipData,
+  clipLocalFrame: number,
+  geometry: {
+    drawX: number;
+    drawY: number;
+    drawWidth: number;
+    drawHeight: number;
+    sourceWidth: number;
+    sourceHeight: number;
+  },
+): void {
+  const masks = layerClip.masks ?? [];
+  if (!masks.length) return;
+
+  const active = masks
+    .map((mask) => ({ mask, points: resolveMaskShapeAtFrame(mask, clipLocalFrame) }))
+    .filter((m) => m.points.length >= 2);
+  if (!active.length) return;
+
+  const w = maskCtx.canvas.width;
+  const h = maskCtx.canvas.height;
+  const sourceScale = (geometry.drawWidth / Math.max(1, geometry.sourceWidth) + geometry.drawHeight / Math.max(1, geometry.sourceHeight)) / 2;
+  const transform = layerCtx.getTransform();
+  const keyframedMaskOpacity = Math.max(
+    0,
+    Math.min(1, evaluateClipNumericKeyframe(layerClip, 'mask.opacity', clipLocalFrame, 1)),
+  );
+  const keyframedMaskFeather = Math.max(
+    0,
+    evaluateClipNumericKeyframe(layerClip, 'mask.feather', clipLocalFrame, 0),
+  );
+  const keyframedMaskExpansion = evaluateClipNumericKeyframe(
+    layerClip,
+    'mask.expansion',
+    clipLocalFrame,
+    0,
+  );
+
+  maskCtx.save();
+  maskCtx.setTransform(1, 0, 0, 1, 0, 0);
+  maskCtx.clearRect(0, 0, w, h);
+  maskCtx.setTransform(transform);
+
+  const effectiveMode = (
+    mode: NonNullable<TimelineClipData['masks']>[number]['mode'],
+    invert: boolean,
+  ): 'add' | 'subtract' | 'intersect' => {
+    if (!invert) return mode;
+    if (mode === 'add') return 'subtract';
+    if (mode === 'subtract') return 'add';
+    return 'intersect';
+  };
+
+  const addMasks = active.filter((m) => effectiveMode(m.mask.mode, m.mask.invert) === 'add');
+  const intersectMasks = active.filter(
+    (m) => effectiveMode(m.mask.mode, m.mask.invert) === 'intersect',
+  );
+  const subtractMasks = active.filter(
+    (m) => effectiveMode(m.mask.mode, m.mask.invert) === 'subtract',
+  );
+
+  if (addMasks.length === 0) {
+    maskCtx.globalCompositeOperation = 'source-over';
+    maskCtx.globalAlpha = 1;
+    maskCtx.filter = 'none';
+    maskCtx.fillStyle = '#fff';
+    maskCtx.fillRect(0, 0, w, h);
+  }
+
+  const paintMask = (
+    entry: (typeof active)[number],
+    composite: GlobalCompositeOperation,
+  ) => {
+    const opacity = Math.max(
+      0,
+      Math.min(1, (entry.mask.opacity ?? 1) * keyframedMaskOpacity),
+    );
+    if (opacity <= 0.0001) return;
+    const featherPx = Math.max(0, (entry.mask.feather + keyframedMaskFeather) * sourceScale);
+    const expansionPx = Math.max(
+      0,
+      (entry.mask.expansion + keyframedMaskExpansion) * sourceScale,
+    );
+    maskCtx.globalCompositeOperation = composite;
+    maskCtx.globalAlpha = opacity;
+    maskCtx.filter = featherPx > 0.1 ? `blur(${featherPx.toFixed(2)}px)` : 'none';
+    maskCtx.fillStyle = '#fff';
+    maskCtx.strokeStyle = '#fff';
+    drawMaskPath(maskCtx, entry.points, {
+      drawX: geometry.drawX,
+      drawY: geometry.drawY,
+      drawWidth: geometry.drawWidth,
+      drawHeight: geometry.drawHeight,
+      sourceWidth: geometry.sourceWidth,
+      sourceHeight: geometry.sourceHeight,
+      closed: entry.mask.closed,
+    });
+    if (entry.mask.closed) {
+      maskCtx.fill();
+    } else {
+      maskCtx.lineWidth = Math.max(1, 2 + expansionPx * 2);
+      maskCtx.lineJoin = 'round';
+      maskCtx.lineCap = 'round';
+      maskCtx.stroke();
+    }
+    if (expansionPx > 0.1) {
+      maskCtx.lineWidth = Math.max(1, expansionPx * 2);
+      maskCtx.lineJoin = 'round';
+      maskCtx.lineCap = 'round';
+      maskCtx.stroke();
+    }
+  };
+
+  for (const entry of addMasks) paintMask(entry, 'source-over');
+  for (const entry of intersectMasks) paintMask(entry, 'destination-in');
+  for (const entry of subtractMasks) paintMask(entry, 'destination-out');
+
+  maskCtx.restore();
+
+  layerCtx.save();
+  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+  layerCtx.globalCompositeOperation = 'destination-in';
+  layerCtx.globalAlpha = 1;
+  layerCtx.filter = 'none';
+  layerCtx.drawImage(maskCtx.canvas, 0, 0);
+  layerCtx.restore();
+}
+
 export function ProgramMonitor() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -117,6 +416,9 @@ export function ProgramMonitor() {
     new Map<string, { seeking: boolean; desired: number; lastSeekAt: number }>(),
   );
   const lastPlayingRef = useRef(false);
+  const adjustmentCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const layerCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -177,7 +479,62 @@ export function ProgramMonitor() {
     const seq = sequences[0];
     if (!seq) return [] as ActiveLayer[];
     const data = seq.data as { tracks?: TimelineTrackData[] } | undefined;
-    return resolveActiveLayers(data?.tracks ?? [], currentFrame, fps);
+    const tracks = data?.tracks ?? [];
+    if (tracks.length === 0) return [] as ActiveLayer[];
+
+    const clipById = new Map<string, TimelineClipData>();
+    const trackIndexById = new Map<string, number>();
+    for (const track of tracks) {
+      trackIndexById.set(track.id, track.index);
+      for (const clip of track.clips) {
+        clipById.set(clip.id, clip);
+      }
+    }
+
+    const coreSeq = adaptSequence(
+      seq.id,
+      seq.projectId,
+      seq.name,
+      tracks,
+      seq.frameRate,
+      seq.resolution,
+    );
+    const plan = buildCompositionPlan(coreSeq, {
+      frames: currentFrame,
+      rate: seq.frameRate,
+    });
+
+    const resolved = plan.videoLayers
+      .map((layer) => {
+        const clip = clipById.get(layer.clipId);
+        if (!clip) return null;
+        const sourceFps = layer.sourceTime.rate.num / layer.sourceTime.rate.den;
+        return {
+          clip,
+          trackIndex: trackIndexById.get(layer.trackId) ?? 0,
+          clipLocalFrame: Math.max(
+            0,
+            Math.min(clip.durationFrames, currentFrame - clip.startFrame),
+          ),
+          sourceTimeSec: sourceFps > 0 ? layer.sourceTime.frames / sourceFps : 0,
+          opacity: layer.opacity,
+          positionX: layer.transform.positionX,
+          positionY: layer.transform.positionY,
+          scaleX: layer.transform.scaleX,
+          scaleY: layer.transform.scaleY,
+          rotation: layer.transform.rotation,
+          anchorX: layer.transform.anchorX,
+          anchorY: layer.transform.anchorY,
+          blendMode: layer.blendMode,
+          transitionProgress: layer.transitionProgress,
+          transitionType: layer.transitionType,
+          transitionPhase: layer.transitionPhase,
+        } as ActiveLayer;
+      })
+      .filter((layer): layer is ActiveLayer => layer != null);
+
+    resolved.sort((a, b) => b.trackIndex - a.trackIndex);
+    return resolved;
   }, [sequences, currentFrame, fps]);
   const seqResolution = sequences[0]?.resolution ?? { width: 1920, height: 1080 };
 
@@ -260,8 +617,8 @@ export function ProgramMonitor() {
     (layer: ActiveLayer): Rect | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      const video = getOrCreateVideo(layer.clip);
-      if (!video || video.readyState < 1) return null;
+      const video = layer.clip.mediaAssetId ? getOrCreateVideo(layer.clip) : null;
+      if (layer.clip.mediaAssetId && (!video || video.readyState < 1)) return null;
 
       const frame = frameFitRect(
         canvas.width,
@@ -269,20 +626,24 @@ export function ProgramMonitor() {
         seqResolution.width,
         seqResolution.height,
       );
-      const vw = video.videoWidth || seqResolution.width;
-      const vh = video.videoHeight || seqResolution.height;
+      const vw = video?.videoWidth || seqResolution.width;
+      const vh = video?.videoHeight || seqResolution.height;
       const tr =
         transformPreviewRef.current?.clipId === layer.clip.id ? transformPreviewRef.current : null;
 
-      const px = tr?.positionX ?? layer.clip.positionX ?? 0;
-      const py = tr?.positionY ?? layer.clip.positionY ?? 0;
-      const sx = tr?.scaleX ?? layer.clip.scaleX ?? 1;
-      const sy = tr?.scaleY ?? layer.clip.scaleY ?? 1;
+      const px = tr?.positionX ?? layer.positionX ?? 0;
+      const py = tr?.positionY ?? layer.positionY ?? 0;
+      const sx = tr?.scaleX ?? layer.scaleX ?? 1;
+      const sy = tr?.scaleY ?? layer.scaleY ?? 1;
+      const anchorX = Math.max(0, Math.min(1, layer.anchorX ?? 0.5));
+      const anchorY = Math.max(0, Math.min(1, layer.anchorY ?? 0.5));
+      const anchorOffsetX = (anchorX - 0.5) * vw * frame.scale;
+      const anchorOffsetY = (anchorY - 0.5) * vh * frame.scale;
 
       const width = vw * frame.scale * Math.abs(sx) * zoom;
       const height = vh * frame.scale * Math.abs(sy) * zoom;
-      const cx = canvas.width / 2 + pan.x + px * zoom;
-      const cy = canvas.height / 2 + pan.y + py * zoom;
+      const cx = canvas.width / 2 + pan.x + (px + anchorOffsetX) * zoom;
+      const cy = canvas.height / 2 + pan.y + (py + anchorOffsetY) * zoom;
 
       return {
         x: cx - width / 2,
@@ -303,103 +664,157 @@ export function ProgramMonitor() {
     let drewAny = false;
 
     for (const layer of activeLayers) {
-      const video = getOrCreateVideo(layer.clip);
-      if (!video) continue;
+      const generatorColor = resolveGeneratorColor(layer.clip);
+      const isAdjustmentLayer = layer.clip.generator?.kind === 'adjustment-layer';
+      const needsMedia = !generatorColor && !isAdjustmentLayer;
+      const video = needsMedia ? getOrCreateVideo(layer.clip) : null;
 
-      const st = seekStateRef.current.get(layer.clip.id) ?? {
-        seeking: false,
-        desired: layer.sourceTimeSec,
-        lastSeekAt: 0,
-      };
-      st.desired = layer.sourceTimeSec;
-      seekStateRef.current.set(layer.clip.id, st);
+      if (needsMedia && !video) continue;
 
-      const clipSpeed = layer.clip.speed ?? 1;
-      const forwardShuttlePlay = isPlaying && shuttleSpeed > 0 && clipSpeed > 0;
+      if (video) {
+        const st = seekStateRef.current.get(layer.clip.id) ?? {
+          seeking: false,
+          desired: layer.sourceTimeSec,
+          lastSeekAt: 0,
+        };
+        st.desired = layer.sourceTimeSec;
+        seekStateRef.current.set(layer.clip.id, st);
 
-      if (forwardShuttlePlay) {
-        st.seeking = false;
-        const layerRate = Math.max(0.1, Math.min(4, Math.abs(shuttleSpeed) * clipSpeed));
-        video.playbackRate = layerRate;
-        if (
-          !lastPlayingRef.current ||
-          Math.abs(video.currentTime - layer.sourceTimeSec) > Math.max(0.12, 0.08 * layerRate)
-        ) {
-          video.currentTime = layer.sourceTimeSec;
-        }
-        if (video.paused) video.play().catch(() => {});
-      } else {
-        video.pause();
-        video.playbackRate = 1;
-        const now = performance.now();
-        const absSpeed = Math.max(1, Math.abs(shuttleSpeed) * Math.max(1, Math.abs(clipSpeed)));
-        const minSeekInterval = Math.max(16, 40 / absSpeed);
+        const clipSpeed = layer.clip.speed ?? 1;
+        const forwardShuttlePlay = isPlaying && shuttleSpeed > 0 && clipSpeed > 0;
 
-        if (st.seeking && now - st.lastSeekAt > 180) {
+        if (forwardShuttlePlay) {
           st.seeking = false;
+          const layerRate = Math.max(0.1, Math.min(4, Math.abs(shuttleSpeed) * clipSpeed));
+          video.playbackRate = layerRate;
+          if (
+            !lastPlayingRef.current ||
+            Math.abs(video.currentTime - layer.sourceTimeSec) > Math.max(0.12, 0.08 * layerRate)
+          ) {
+            video.currentTime = layer.sourceTimeSec;
+          }
+          if (video.paused) video.play().catch(() => {});
+        } else {
+          video.pause();
+          video.playbackRate = 1;
+          const now = performance.now();
+          const absSpeed = Math.max(1, Math.abs(shuttleSpeed) * Math.max(1, Math.abs(clipSpeed)));
+          const minSeekInterval = Math.max(16, 40 / absSpeed);
+
+          if (st.seeking && now - st.lastSeekAt > 180) {
+            st.seeking = false;
+          }
+
+          if (
+            !st.seeking &&
+            now - st.lastSeekAt >= minSeekInterval &&
+            Math.abs(video.currentTime - layer.sourceTimeSec) > 0.02
+          ) {
+            st.seeking = true;
+            st.lastSeekAt = now;
+            video.currentTime = layer.sourceTimeSec;
+          }
         }
 
-        if (
-          !st.seeking &&
-          now - st.lastSeekAt >= minSeekInterval &&
-          Math.abs(video.currentTime - layer.sourceTimeSec) > 0.02
-        ) {
-          st.seeking = true;
-          st.lastSeekAt = now;
-          video.currentTime = layer.sourceTimeSec;
-        }
+        if (video.readyState < 2) continue;
       }
 
-      if (video.readyState < 2) continue;
       if (!drewAny) {
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       }
+
       const frame = frameFitRect(
         canvas.width,
         canvas.height,
         seqResolution.width,
         seqResolution.height,
       );
-      const vw = video.videoWidth || seqResolution.width;
-      const vh = video.videoHeight || seqResolution.height;
+      const vw = video?.videoWidth || seqResolution.width;
+      const vh = video?.videoHeight || seqResolution.height;
       const drawWidth = vw * frame.scale;
       const drawHeight = vh * frame.scale;
 
       const tr =
         transformPreviewRef.current?.clipId === layer.clip.id ? transformPreviewRef.current : null;
 
-      const px = tr?.positionX ?? layer.clip.positionX ?? 0;
-      const py = tr?.positionY ?? layer.clip.positionY ?? 0;
-      const sx = tr?.scaleX ?? layer.clip.scaleX ?? 1;
-      const sy = tr?.scaleY ?? layer.clip.scaleY ?? 1;
-      const rot = layer.clip.rotation ?? 0;
-      const opacity = Math.max(0, Math.min(1, layer.clip.opacity ?? 1));
+      const px = tr?.positionX ?? layer.positionX ?? 0;
+      const py = tr?.positionY ?? layer.positionY ?? 0;
+      const sx = tr?.scaleX ?? layer.scaleX ?? 1;
+      const sy = tr?.scaleY ?? layer.scaleY ?? 1;
+      const rot = layer.rotation ?? 0;
+      const opacity = Math.max(
+        0,
+        Math.min(1, (layer.opacity ?? 1) * transitionOpacityMultiplier(layer)),
+      );
       const brightness = Math.max(0, layer.clip.brightness ?? 1);
       const contrast = Math.max(0, layer.clip.contrast ?? 1);
       const saturation = Math.max(0, layer.clip.saturation ?? 1);
       const hue = layer.clip.hue ?? 0;
       const vignette = Math.max(-1, Math.min(1, layer.clip.vignette ?? 0));
+      const blendMode = layer.blendMode ?? layer.clip.blendMode ?? 'normal';
 
-      ctx.save();
-      ctx.translate(canvas.width / 2 + pan.x, canvas.height / 2 + pan.y);
-      ctx.scale(zoom, zoom);
-      ctx.translate(-canvas.width / 2, -canvas.height / 2);
-
-      ctx.globalAlpha = opacity;
-      ctx.filter = `brightness(${brightness * 100}%) contrast(${contrast * 100}%) saturate(${saturation * 100}%) hue-rotate(${hue}deg)`;
-      ctx.translate(canvas.width / 2 + px, canvas.height / 2 + py);
-      ctx.rotate((rot * Math.PI) / 180);
-      ctx.scale(safeScale(sx), safeScale(sy));
-      ctx.translate(-canvas.width / 2, -canvas.height / 2);
+      let layerCanvas = layerCanvasRef.current;
+      if (!layerCanvas) {
+        layerCanvas = document.createElement('canvas');
+        layerCanvasRef.current = layerCanvas;
+      }
+      if (layerCanvas.width !== canvas.width || layerCanvas.height !== canvas.height) {
+        layerCanvas.width = canvas.width;
+        layerCanvas.height = canvas.height;
+      }
+      const layerCtx = layerCanvas.getContext('2d');
+      if (!layerCtx) continue;
+      layerCtx.clearRect(0, 0, layerCanvas.width, layerCanvas.height);
 
       const dx = canvas.width / 2 - drawWidth / 2;
       const dy = canvas.height / 2 - drawHeight / 2;
-      ctx.drawImage(video, dx, dy, drawWidth, drawHeight);
-      if (Math.abs(vignette) > 0.001) {
+      const anchorX = Math.max(0, Math.min(1, layer.anchorX ?? 0.5));
+      const anchorY = Math.max(0, Math.min(1, layer.anchorY ?? 0.5));
+      const anchorOffsetX = (anchorX - 0.5) * drawWidth;
+      const anchorOffsetY = (anchorY - 0.5) * drawHeight;
+
+      layerCtx.save();
+      layerCtx.translate(canvas.width / 2 + pan.x, canvas.height / 2 + pan.y);
+      layerCtx.scale(zoom, zoom);
+      layerCtx.translate(-canvas.width / 2, -canvas.height / 2);
+      layerCtx.translate(canvas.width / 2 + px, canvas.height / 2 + py);
+      layerCtx.translate(anchorOffsetX, anchorOffsetY);
+      layerCtx.rotate((rot * Math.PI) / 180);
+      layerCtx.scale(safeScale(sx), safeScale(sy));
+      layerCtx.translate(-canvas.width / 2, -canvas.height / 2);
+
+      layerCtx.globalCompositeOperation = 'source-over';
+      layerCtx.globalAlpha = 1;
+      layerCtx.filter = `brightness(${brightness * 100}%) contrast(${contrast * 100}%) saturate(${saturation * 100}%) hue-rotate(${hue}deg)`;
+
+      if (isAdjustmentLayer) {
+        let off = adjustmentCanvasRef.current;
+        if (!off) {
+          off = document.createElement('canvas');
+          adjustmentCanvasRef.current = off;
+        }
+        if (off.width !== canvas.width || off.height !== canvas.height) {
+          off.width = canvas.width;
+          off.height = canvas.height;
+        }
+        const octx = off.getContext('2d');
+        if (octx) {
+          octx.clearRect(0, 0, off.width, off.height);
+          octx.drawImage(canvas, 0, 0);
+          layerCtx.drawImage(off, dx, dy, drawWidth, drawHeight);
+        }
+      } else if (generatorColor) {
+        layerCtx.fillStyle = generatorColor;
+        layerCtx.fillRect(dx, dy, drawWidth, drawHeight);
+      } else if (video) {
+        layerCtx.drawImage(video, dx, dy, drawWidth, drawHeight);
+      }
+
+      if (!isAdjustmentLayer && Math.abs(vignette) > 0.001) {
         const inner = Math.min(drawWidth, drawHeight) * 0.2;
         const outer = Math.max(drawWidth, drawHeight) * 0.7;
-        const grad = ctx.createRadialGradient(
+        const grad = layerCtx.createRadialGradient(
           dx + drawWidth / 2,
           dy + drawHeight / 2,
           inner,
@@ -415,9 +830,45 @@ export function ProgramMonitor() {
           grad.addColorStop(0, 'rgba(255,255,255,0)');
           grad.addColorStop(1, `rgba(255,255,255,${a})`);
         }
-        ctx.fillStyle = grad;
-        ctx.fillRect(dx, dy, drawWidth, drawHeight);
+        layerCtx.filter = 'none';
+        layerCtx.fillStyle = grad;
+        layerCtx.fillRect(dx, dy, drawWidth, drawHeight);
       }
+
+      let maskCanvas = maskCanvasRef.current;
+      if (!maskCanvas) {
+        maskCanvas = document.createElement('canvas');
+        maskCanvasRef.current = maskCanvas;
+      }
+      if (maskCanvas.width !== canvas.width || maskCanvas.height !== canvas.height) {
+        maskCanvas.width = canvas.width;
+        maskCanvas.height = canvas.height;
+      }
+      const maskCtx = maskCanvas.getContext('2d');
+      if (maskCtx && (layer.clip.masks?.length ?? 0) > 0) {
+        applyClipMasks(layerCtx, maskCtx, layer.clip, layer.clipLocalFrame, {
+          drawX: dx,
+          drawY: dy,
+          drawWidth,
+          drawHeight,
+          sourceWidth: vw,
+          sourceHeight: vh,
+        });
+      }
+
+      layerCtx.restore();
+
+      ctx.save();
+      ctx.globalCompositeOperation = blendModeToComposite(blendMode);
+      ctx.globalAlpha = opacity;
+      if (blendMode === 'silhouette-luma') {
+        const lumaGamma = layer.clip.blendParams?.silhouetteGamma ?? 1;
+        const lumaBoost = Math.max(0.25, Math.min(4, lumaGamma));
+        ctx.filter = `grayscale(100%) contrast(${100 * lumaBoost}%)`;
+      } else {
+        ctx.filter = 'none';
+      }
+      ctx.drawImage(layerCanvas, 0, 0);
       ctx.restore();
       drewAny = true;
     }

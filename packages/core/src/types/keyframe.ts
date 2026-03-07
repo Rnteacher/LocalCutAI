@@ -10,7 +10,12 @@ export type AnimatableProperty =
   | 'transform.positionY'
   | 'transform.scaleX'
   | 'transform.scaleY'
-  | 'transform.rotation';
+  | 'transform.rotation'
+  | 'transform.anchorX'
+  | 'transform.anchorY'
+  | 'mask.opacity'
+  | 'mask.feather'
+  | 'mask.expansion';
 
 export interface Keyframe {
   id: ID;

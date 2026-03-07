@@ -58,16 +58,20 @@ export interface ClipItem {
   // Visual properties
   opacity: number; // 0.0 - 1.0
   blendMode: BlendMode;
+  blendParams?: ClipBlendParams;
 
   // Keyframes for animated properties
   keyframes: Keyframe[];
 
   // Transitions
-  transitionIn: Transition | null;
-  transitionOut: Transition | null;
+  transitionIn: TransitionData | null;
+  transitionOut: TransitionData | null;
 
   // AI-generated masks
-  masks: ID[]; // References to MaskAsset IDs
+  masks: ManualMaskData[];
+
+  // Synthetic clips and layer effects
+  generator: GeneratorData | null;
 
   // Flags
   disabled: boolean;
@@ -88,13 +92,57 @@ export interface TransformState {
   anchorY: number;
 }
 
-export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'add';
+export type BlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'add'
+  | 'silhouette-alpha'
+  | 'silhouette-luma';
 
-export interface Transition {
+export interface TransitionData {
   id: ID;
   type: TransitionType;
   duration: TimeValue;
-  params: Record<string, number>;
+  params?: Record<string, number>;
+  audioCrossfade?: boolean;
 }
 
-export type TransitionType = 'dissolve' | 'wipe-left' | 'wipe-right' | 'fade-black';
+export type TransitionType = 'cross-dissolve' | 'fade-black';
+
+export interface ClipBlendParams {
+  silhouetteGamma?: number;
+}
+
+export interface MaskPoint {
+  x: number;
+  y: number;
+  inX: number;
+  inY: number;
+  outX: number;
+  outY: number;
+}
+
+export interface MaskShapeKeyframe {
+  id: ID;
+  frame: number;
+  points: MaskPoint[];
+}
+
+export interface ManualMaskData {
+  id: ID;
+  name: string;
+  mode: 'add' | 'subtract' | 'intersect';
+  closed: boolean;
+  invert: boolean;
+  opacity: number;
+  feather: number;
+  expansion: number;
+  keyframes: MaskShapeKeyframe[];
+}
+
+export interface GeneratorData {
+  kind: 'black-video' | 'color-matte' | 'adjustment-layer';
+  color?: string;
+}
