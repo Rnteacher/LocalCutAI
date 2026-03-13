@@ -577,15 +577,23 @@ export function KeyframeMiniGraph({
   };
   const plotWidth = Math.max(1, graphWidth - graphPadding.left - graphPadding.right);
   const plotHeight = Math.max(1, graphHeight - graphPadding.top - graphPadding.bottom);
+  const dataPadding = {
+    x: 10,
+    y: 10,
+  };
+  const plotDataLeft = graphPadding.left + dataPadding.x;
+  const plotDataTop = graphPadding.top + dataPadding.y;
+  const plotDataWidth = Math.max(1, plotWidth - dataPadding.x * 2);
+  const plotDataHeight = Math.max(1, plotHeight - dataPadding.y * 2);
   const isFrameVisible = useCallback(
     (frame: number) => frame >= frameWindowStart && frame <= frameWindowEnd,
     [frameWindowEnd, frameWindowStart],
   );
   const toX = (frame: number): number =>
-    graphPadding.left +
-    ((frame - frameWindowStart) / frameWindowSpan) * plotWidth;
+    plotDataLeft +
+    ((frame - frameWindowStart) / frameWindowSpan) * plotDataWidth;
   const toY = (value: number): number =>
-    graphPadding.top + (1 - (value - bounds.min) / span) * plotHeight;
+    plotDataTop + (1 - (value - bounds.min) / span) * plotDataHeight;
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -733,8 +741,8 @@ export function KeyframeMiniGraph({
     ) => {
       const point = clientToGraphPoint(clientX, clientY);
       if (!point) return;
-      const nx = clamp01((point.x - graphPadding.left) / plotWidth);
-      const ny = clamp01((point.y - graphPadding.top) / plotHeight);
+      const nx = clamp01((point.x - plotDataLeft) / plotDataWidth);
+      const ny = clamp01((point.y - plotDataTop) / plotDataHeight);
       const rawFrame = frameWindowStart + nx * frameWindowSpan;
       const index = effective.findIndex((kf) => kf.id === keyframeId);
       const minFrame =
@@ -760,10 +768,10 @@ export function KeyframeMiniGraph({
       effective,
       frameWindowSpan,
       frameWindowStart,
-      graphPadding.left,
-      graphPadding.top,
-      plotHeight,
-      plotWidth,
+      plotDataHeight,
+      plotDataLeft,
+      plotDataTop,
+      plotDataWidth,
       totalDuration,
       safeSnapStep,
     ],
@@ -952,7 +960,7 @@ export function KeyframeMiniGraph({
     (clientX: number, deltaY: number, shiftKey: boolean) => {
       const point = clientToGraphPoint(clientX, 0);
       if (!point) return;
-      const nx = clamp01((point.x - graphPadding.left) / plotWidth);
+      const nx = clamp01((point.x - plotDataLeft) / plotDataWidth);
       const focalFrame = frameWindowStart + nx * frameWindowSpan;
       const minSpan = minimumFrameWindowSpan;
 
@@ -979,8 +987,8 @@ export function KeyframeMiniGraph({
       minimumFrameWindowSpan,
       clientToGraphPoint,
       totalDuration,
-      graphPadding.left,
-      plotWidth,
+      plotDataLeft,
+      plotDataWidth,
     ],
   );
 
