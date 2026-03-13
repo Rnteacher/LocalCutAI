@@ -1,0 +1,186 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - heading "LOCALCUT" [level=1] [ref=e5]
+    - generic [ref=e6]: v0.1.0
+    - generic [ref=e34]: /
+    - generic [ref=e35]: test
+    - generic [ref=e36]:
+      - combobox "Project FPS" [ref=e37]:
+        - option "24fps" [selected]
+        - option "25fps"
+        - option "30fps"
+        - option "60fps"
+      - combobox "Project resolution" [ref=e38]:
+        - option "1280x720" [selected]
+        - option "1920x1080"
+      - combobox "Audio sample rate" [ref=e39]:
+        - option "44.1kHz"
+        - option "48kHz" [selected]
+      - button "Export" [ref=e40]
+      - button "Settings" [ref=e41]
+      - generic [ref=e42]: C:\Users\ronen\LocalCut-Projects\test_sQNqFD6lxi-T
+  - main [ref=e43]:
+    - complementary [ref=e45]:
+      - generic [ref=e46]:
+        - generic [ref=e47]:
+          - text: Media
+          - generic [ref=e48]: test
+        - generic [ref=e49]:
+          - button "◀" [ref=e50]
+          - button "Back" [ref=e51]
+          - button "+ Import" [ref=e52]
+      - generic [ref=e53]:
+        - textbox "Search media..." [ref=e54]
+        - generic [ref=e55]:
+          - combobox [ref=e56]:
+            - option "All Types" [selected]
+            - option "Video"
+            - option "Audio"
+            - option "Image"
+          - button "List" [ref=e57]
+          - button "Grid" [ref=e58]
+      - generic [ref=e59]:
+        - button "___202602101933_kq0s4.mp4 video 0:08 1280×720 1.8 MB" [ref=e60]:
+          - generic [ref=e63]:
+            - generic [ref=e64]: ___202602101933_kq0s4.mp4
+            - generic [ref=e65]:
+              - generic [ref=e66]: video
+              - generic [ref=e67]: 0:08
+              - generic [ref=e68]: 1280×720
+              - generic [ref=e69]: 1.8 MB
+        - button "___202602101929_7wkz6.mp4 video 0:08 1280×720 4.9 MB" [ref=e70]:
+          - generic [ref=e73]:
+            - generic [ref=e74]: ___202602101929_7wkz6.mp4
+            - generic [ref=e75]:
+              - generic [ref=e76]: video
+              - generic [ref=e77]: 0:08
+              - generic [ref=e78]: 1280×720
+              - generic [ref=e79]: 4.9 MB
+        - button "___202602101929_1fyc8.mp4 video 0:08 1280×720 7.5 MB" [ref=e80]:
+          - generic [ref=e83]:
+            - generic [ref=e84]: ___202602101929_1fyc8.mp4
+            - generic [ref=e85]:
+              - generic [ref=e86]: video
+              - generic [ref=e87]: 0:08
+              - generic [ref=e88]: 1280×720
+              - generic [ref=e89]: 7.5 MB
+        - button "___202602101929_k9d5c.mp4 video 0:08 1280×720 5.5 MB" [ref=e90]:
+          - generic [ref=e93]:
+            - generic [ref=e94]: ___202602101929_k9d5c.mp4
+            - generic [ref=e95]:
+              - generic [ref=e96]: video
+              - generic [ref=e97]: 0:08
+              - generic [ref=e98]: 1280×720
+              - generic [ref=e99]: 5.5 MB
+    - generic [ref=e100]:
+      - generic [ref=e101]:
+        - generic [ref=e104]:
+          - generic [ref=e105]:
+            - generic [ref=e107]: Source
+            - generic [ref=e108]: 00:00:00:00
+          - generic [ref=e109]:
+            - generic [ref=e111]: Select a clip to preview
+            - generic [ref=e112]:
+              - button "-" [ref=e113]
+              - generic [ref=e114]: 100%
+              - button "+" [ref=e115]
+              - button "Fit" [ref=e116]
+            - generic [ref=e117]:
+              - button "I" [ref=e118]
+              - button "⏮" [ref=e119]
+              - button "◀" [ref=e120]
+              - button "▶" [ref=e121]
+              - button "▶" [ref=e122]
+              - button "⏭" [ref=e123]
+              - button "O" [ref=e124]
+              - button "Clr" [ref=e125]
+              - button "Insert" [ref=e127]
+              - button "Overwrite" [ref=e128]
+          - generic [ref=e129]:
+            - generic [ref=e130]:
+              - generic [ref=e131]: Viewfinder
+              - generic [ref=e132]: 00:00:00:00
+            - generic [ref=e134]:
+              - textbox [ref=e135]: 00:00:00:00
+              - generic [ref=e136]: I/O + seek exact position
+              - generic [ref=e137]: "Mode: Overwrite"
+        - generic [ref=e141]:
+          - generic [ref=e142]:
+            - generic [ref=e143]: Program
+            - generic [ref=e144]: 00:00:00:00
+          - generic [ref=e145]:
+            - generic:
+              - generic: 00:00:00:00
+              - generic: "clip: 12edc337c1f4"
+              - generic "Approximate frame render time": 0.8ms
+            - generic [ref=e147]:
+              - button "AutoKey" [ref=e148]
+              - button "Renderer Auto" [ref=e149]
+              - generic "Active renderer backend" [ref=e150]: GL2
+              - button "Mask" [ref=e151]
+              - button "Onion On" [ref=e152]
+              - button "+Mask" [ref=e153]
+              - button "-" [ref=e154]
+              - generic [ref=e155]: 100%
+              - button "+" [ref=e156]
+              - button "Fit" [ref=e157]
+            - generic [ref=e158]:
+              - button "|<" [ref=e159]
+              - button "<" [ref=e160]
+              - button "Play" [ref=e161]
+              - button ">" [ref=e162]
+              - button ">|" [ref=e163]
+              - button "I" [ref=e164]
+              - button "O" [ref=e165]
+              - button "Clr" [ref=e166]
+              - button "Lift" [disabled] [ref=e167]
+              - button "Extract" [disabled] [ref=e168]
+          - generic [ref=e169]:
+            - generic [ref=e170]:
+              - generic [ref=e171]: Viewfinder
+              - generic [ref=e172]: 00:00:00:00
+            - generic [ref=e175]:
+              - textbox [ref=e176]: 00:00:00:00
+              - generic [ref=e177]: Drag clip in viewer to move, corner to resize
+      - generic [ref=e180]:
+        - generic [ref=e181]:
+          - generic [ref=e182]:
+            - generic [ref=e183]: Timeline
+            - generic [ref=e184]: Sequence 1
+            - generic [ref=e185]: 24fps
+            - generic [ref=e186]:
+              - button "Timeline" [ref=e187]
+              - button "Graph" [active] [ref=e188]
+          - generic [ref=e189]:
+            - generic [ref=e190]:
+              - generic [ref=e345]: No clip selected
+              - generic [ref=e346]: Position X
+            - generic [ref=e210]: 00:00:00:00
+        - generic [ref=e211]:
+          - generic [ref=e213]: Select one clip in the timeline to edit keyframes.
+          - complementary [ref=e347]:
+            - generic [ref=e348]:
+              - generic [ref=e351]: L
+              - generic [ref=e354]: R
+              - generic:
+                - generic: "0"
+                - generic: "-6"
+                - generic: "-12"
+                - generic: "-18"
+                - generic: "-24"
+                - generic: "-36"
+                - generic: "-48"
+    - complementary [ref=e338]:
+      - generic [ref=e339]:
+        - heading "Inspector" [level=2] [ref=e340]
+        - button "▶" [ref=e341]
+      - generic [ref=e342]: No selection
+  - contentinfo [ref=e27]:
+    - generic [ref=e28]:
+      - generic [ref=e29]: Ready
+      - generic [ref=e30]: "Tool: Select"
+      - generic [ref=e31]: Linked
+    - generic [ref=e32]:
+      - generic [ref=e343]: 1280×720 • 24fps
+      - generic [ref=e344]: 4 assets
+      - generic [ref=e33]: "Space: play • J/K/L: shuttle • ←/→: 1f • ↑/↓: cuts • Home/End • C/V • M/[ ]"

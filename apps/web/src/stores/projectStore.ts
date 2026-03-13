@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { api } from '../lib/api.js';
-import type { ApiProject, ApiMediaAsset, ApiSequence } from '../lib/api.js';
+import type { ApiMediaDedupeResult, ApiProject, ApiMediaAsset, ApiSequence } from '../lib/api.js';
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -39,6 +39,14 @@ export interface TimelineKeyframeData {
   id: string;
   property:
     | 'opacity'
+    | 'speed'
+    | 'volume'
+    | 'pan'
+    | 'brightness'
+    | 'contrast'
+    | 'saturation'
+    | 'hue'
+    | 'vignette'
     | 'transform.positionX'
     | 'transform.positionY'
     | 'transform.scaleX'
@@ -171,6 +179,7 @@ interface SequenceData {
 
 const MAX_HISTORY = 50;
 let clipPropsMutationToken = 0;
+let clipKeyframeMutationToken = 0;
 const sequenceUpdateQueues = new Map<string, Promise<ApiSequence>>();
 type SequenceUpdatePayload = Parameters<typeof api.sequences.update>[1];
 
@@ -237,7 +246,9 @@ interface ProjectState {
     audioChannels?: number;
   }) => Promise<void>;
   importMedia: (filePaths: string[]) => Promise<void>;
-  uploadMedia: (files: FileList | File[]) => Promise<void>;
+  pickMedia: () => Promise<ApiMediaAsset[]>;
+  uploadMedia: (files: FileList | File[]) => Promise<ApiMediaAsset[]>;
+  dedupeMedia: () => Promise<ApiMediaDedupeResult | null>;
   deleteMedia: (assetId: string) => Promise<void>;
   setError: (error: string | null) => void;
 
@@ -360,6 +371,25 @@ interface ProjectState {
 
 function generateId(): string {
   return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+}
+
+function mergeMediaAssets(existing: ApiMediaAsset[], incoming: ApiMediaAsset[]): ApiMediaAsset[] {
+  const map = new Map(existing.map((asset) => [asset.id, asset] as const));
+  for (const asset of incoming) {
+    map.set(asset.id, asset);
+  }
+  return [...map.values()];
+}
+
+function isAbsoluteLocalPath(value: string): boolean {
+  if (!value || value.includes('fakepath')) return false;
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('/') || value.startsWith('\\\\');
+}
+
+function extractNativeFilePath(file: File): string | null {
+  const candidate = (file as File & { path?: unknown; filepath?: unknown }).path
+    ?? (file as File & { path?: unknown; filepath?: unknown }).filepath;
+  return typeof candidate === 'string' && isAbsoluteLocalPath(candidate) ? candidate : null;
 }
 
 function normalizeTransitionType(raw: unknown): TimelineTransitionType {
@@ -1393,7 +1423,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     try {
       const result = await api.media.import(project.id, filePaths);
       set((s) => ({
-        mediaAssets: [...s.mediaAssets, ...result.imported],
+        mediaAssets: mergeMediaAssets(s.mediaAssets, result.imported),
         isLoading: false,
       }));
     } catch (err) {
@@ -1401,24 +1431,89 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  uploadMedia: async (files: FileList | File[]) => {
+  pickMedia: async () => {
     const project = get().currentProject;
-    if (!project) return;
-    if (!files || (files instanceof FileList && files.length === 0)) return;
+    if (!project) return [];
 
     set({ isLoading: true, error: null });
     try {
-      const result = await api.media.upload(project.id, files);
+      const result = await api.media.pick(project.id);
       set((s) => ({
-        mediaAssets: [...s.mediaAssets, ...result.imported],
+        mediaAssets: mergeMediaAssets(s.mediaAssets, result.imported),
         isLoading: false,
       }));
       if (result.errors.length > 0) {
-        const errorNames = result.errors.map((e) => e.name).join(', ');
-        set({ error: `Failed to import: ${errorNames}` });
+        const errorNames = result.errors.map((e) => e.path).join(', ');
+        set({ error: `Failed to link: ${errorNames}` });
       }
+      return result.imported;
     } catch (err) {
       set({ error: (err as Error).message, isLoading: false });
+      return [];
+    }
+  },
+
+  uploadMedia: async (files: FileList | File[]) => {
+    const project = get().currentProject;
+    if (!project) return [];
+    if (!files || (files instanceof FileList && files.length === 0)) return [];
+
+    set({ isLoading: true, error: null });
+    try {
+      const fileList = Array.from(files as ArrayLike<File>);
+      const linkedPaths = [...new Set(fileList.map(extractNativeFilePath).filter((value): value is string => !!value))];
+
+      if (linkedPaths.length > 0) {
+        const result = await api.media.import(project.id, linkedPaths);
+        set((s) => ({
+          mediaAssets: mergeMediaAssets(s.mediaAssets, result.imported),
+          isLoading: false,
+        }));
+        if (linkedPaths.length !== fileList.length) {
+          set({
+            error:
+              'Some files were skipped because this runtime did not expose native source paths. Use the Link Media button for fully linked imports.',
+          });
+        }
+        return result.imported;
+      }
+
+      set({
+        isLoading: false,
+        error:
+          'This runtime did not expose native source file paths, so files were not copied into the project. Use the Link Media button instead.',
+      });
+      return [];
+    } catch (err) {
+      set({ error: (err as Error).message, isLoading: false });
+      return [];
+    }
+  },
+
+  dedupeMedia: async () => {
+    const project = get().currentProject;
+    if (!project) return null;
+
+    set({ isLoading: true, error: null });
+    try {
+      const [result, refreshedProject, refreshedMedia] = await Promise.all([
+        api.media.dedupe(project.id),
+        api.projects.get(project.id),
+        api.media.list(project.id),
+      ]);
+      const { sequences = [], ...projectData } = refreshedProject;
+      set({
+        currentProject: projectData,
+        sequences,
+        mediaAssets: refreshedMedia,
+        isLoading: false,
+        _history: [],
+        _future: [],
+      });
+      return result;
+    } catch (err) {
+      set({ error: (err as Error).message, isLoading: false });
+      return null;
     }
   },
 
@@ -2139,10 +2234,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }));
 
     const updatedData = { ...data, tracks: updatedTracks };
+
+    // Optimistic update for responsive keyframe editing in Inspector/Graph.
+    set((s) => ({
+      sequences: s.sequences.map((sq) =>
+        sq.id === seq.id ? ({ ...sq, data: updatedData } as ApiSequence) : sq,
+      ),
+    }));
+
+    const token = ++clipKeyframeMutationToken;
+
     try {
       const updatedSeq = await enqueueSequenceUpdate(seq.id, {
         data: updatedData as Record<string, unknown>,
       });
+      if (token !== clipKeyframeMutationToken) {
+        return;
+      }
       set((s) => ({
         sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
       }));
@@ -2169,10 +2277,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }),
     }));
     const updatedData = { ...data, tracks: updatedTracks };
+
+    // Optimistic update for responsive keyframe deletion in Inspector/Graph.
+    set((s) => ({
+      sequences: s.sequences.map((sq) =>
+        sq.id === seq.id ? ({ ...sq, data: updatedData } as ApiSequence) : sq,
+      ),
+    }));
+
+    const token = ++clipKeyframeMutationToken;
+
     try {
       const updatedSeq = await enqueueSequenceUpdate(seq.id, {
         data: updatedData as Record<string, unknown>,
       });
+      if (token !== clipKeyframeMutationToken) {
+        return;
+      }
       set((s) => ({
         sequences: s.sequences.map((sq) => (sq.id === seq.id ? updatedSeq : sq)),
       }));

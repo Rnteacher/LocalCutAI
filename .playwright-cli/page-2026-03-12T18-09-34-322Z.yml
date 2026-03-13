@@ -1,0 +1,445 @@
+- generic [ref=e571]:
+  - banner [ref=e572]:
+    - heading "LOCALCUT" [level=1] [ref=e573]
+    - generic [ref=e574]: v0.1.0
+    - generic [ref=e575]: /
+    - generic [ref=e576]: test
+    - generic [ref=e577]:
+      - combobox "Project FPS" [ref=e578]:
+        - option "24fps" [selected]
+        - option "25fps"
+        - option "30fps"
+        - option "60fps"
+      - combobox "Project resolution" [ref=e579]:
+        - option "1280x720" [selected]
+        - option "1920x1080"
+      - combobox "Audio sample rate" [ref=e580]:
+        - option "44.1kHz"
+        - option "48kHz" [selected]
+      - button "Export" [ref=e581]
+      - button "Settings" [ref=e582]
+      - generic [ref=e583]: C:\Users\ronen\LocalCut-Projects\test_sQNqFD6lxi-T
+  - main [ref=e584]:
+    - complementary [ref=e586]:
+      - generic [ref=e587]:
+        - generic [ref=e588]:
+          - text: Media
+          - generic [ref=e589]: test
+        - generic [ref=e590]:
+          - button "◀" [ref=e591]
+          - button "Back" [ref=e592]
+          - button "+ Import" [ref=e593]
+      - generic [ref=e594]:
+        - textbox "Search media..." [ref=e595]
+        - generic [ref=e596]:
+          - combobox [ref=e597]:
+            - option "All Types" [selected]
+            - option "Video"
+            - option "Audio"
+            - option "Image"
+          - button "List" [ref=e598]
+          - button "Grid" [ref=e599]
+      - generic [ref=e600]:
+        - button "___202602101933_kq0s4.mp4 video 0:08 1280×720 1.8 MB" [ref=e601]:
+          - generic [ref=e604]:
+            - generic [ref=e605]: ___202602101933_kq0s4.mp4
+            - generic [ref=e606]:
+              - generic [ref=e607]: video
+              - generic [ref=e608]: 0:08
+              - generic [ref=e609]: 1280×720
+              - generic [ref=e610]: 1.8 MB
+        - button "___202602101929_7wkz6.mp4 video 0:08 1280×720 4.9 MB" [ref=e611]:
+          - generic [ref=e614]:
+            - generic [ref=e615]: ___202602101929_7wkz6.mp4
+            - generic [ref=e616]:
+              - generic [ref=e617]: video
+              - generic [ref=e618]: 0:08
+              - generic [ref=e619]: 1280×720
+              - generic [ref=e620]: 4.9 MB
+        - button "___202602101929_1fyc8.mp4 video 0:08 1280×720 7.5 MB" [ref=e621]:
+          - generic [ref=e624]:
+            - generic [ref=e625]: ___202602101929_1fyc8.mp4
+            - generic [ref=e626]:
+              - generic [ref=e627]: video
+              - generic [ref=e628]: 0:08
+              - generic [ref=e629]: 1280×720
+              - generic [ref=e630]: 7.5 MB
+        - button "___202602101929_k9d5c.mp4 video 0:08 1280×720 5.5 MB" [ref=e631]:
+          - generic [ref=e634]:
+            - generic [ref=e635]: ___202602101929_k9d5c.mp4
+            - generic [ref=e636]:
+              - generic [ref=e637]: video
+              - generic [ref=e638]: 0:08
+              - generic [ref=e639]: 1280×720
+              - generic [ref=e640]: 5.5 MB
+    - generic [ref=e641]:
+      - generic [ref=e642]:
+        - generic [ref=e645]:
+          - generic [ref=e646]:
+            - generic [ref=e648]: Source
+            - generic [ref=e649]: 00:00:00:00
+          - generic [ref=e650]:
+            - generic [ref=e652]: Select a clip to preview
+            - generic [ref=e653]:
+              - button "-" [ref=e654]
+              - generic [ref=e655]: 100%
+              - button "+" [ref=e656]
+              - button "Fit" [ref=e657]
+            - generic [ref=e658]:
+              - button "I" [ref=e659]
+              - button "⏮" [ref=e660]
+              - button "◀" [ref=e661]
+              - button "▶" [ref=e662]
+              - button "▶" [ref=e663]
+              - button "⏭" [ref=e664]
+              - button "O" [ref=e665]
+              - button "Clr" [ref=e666]
+              - button "Insert" [ref=e668]
+              - button "Overwrite" [ref=e669]
+          - generic [ref=e670]:
+            - generic [ref=e671]:
+              - generic [ref=e672]: Viewfinder
+              - generic [ref=e673]: 00:00:00:00
+            - generic [ref=e675]:
+              - textbox [ref=e676]: 00:00:00:00
+              - generic [ref=e677]: I/O + seek exact position
+              - generic [ref=e678]: "Mode: Overwrite"
+        - generic [ref=e682]:
+          - generic [ref=e683]:
+            - generic [ref=e684]: Program
+            - generic [ref=e685]: 00:00:00:00
+          - generic [ref=e686]:
+            - generic:
+              - generic: 00:00:00:00
+              - generic: "clip: 12edc337c1f4"
+              - generic "Approximate frame render time": 0.3ms
+            - generic [ref=e688]:
+              - button "AutoKey" [ref=e689]
+              - button "Renderer Auto" [ref=e690]
+              - generic "Active renderer backend" [ref=e691]: GL2
+              - button "Mask" [ref=e692]
+              - button "Onion On" [ref=e693]
+              - button "+Mask" [ref=e694]
+              - button "-" [ref=e695]
+              - generic [ref=e696]: 100%
+              - button "+" [ref=e697]
+              - button "Fit" [ref=e698]
+            - generic [ref=e699]:
+              - button "|<" [ref=e700]
+              - button "<" [ref=e701]
+              - button "Play" [ref=e702]
+              - button ">" [ref=e703]
+              - button ">|" [ref=e704]
+              - button "I" [ref=e705]
+              - button "O" [ref=e706]
+              - button "Clr" [ref=e707]
+              - button "Lift" [disabled] [ref=e708]
+              - button "Extract" [disabled] [ref=e709]
+          - generic [ref=e710]:
+            - generic [ref=e711]:
+              - generic [ref=e712]: Viewfinder
+              - generic [ref=e713]: 00:00:00:00
+            - generic [ref=e716]:
+              - textbox [ref=e717]: 00:00:00:00
+              - generic [ref=e718]: Drag clip in viewer to move, corner to resize
+      - generic [ref=e721]:
+        - generic [ref=e722]:
+          - generic [ref=e723]:
+            - generic [ref=e724]: Timeline
+            - generic [ref=e725]: Sequence 1
+            - generic [ref=e726]: 24fps
+            - generic [ref=e727]:
+              - button "Timeline" [ref=e728]
+              - button "Graph" [ref=e729]
+          - generic [ref=e730]:
+            - generic [ref=e731]:
+              - button "Select" [ref=e732]
+              - button "Razor" [ref=e733]
+              - button "Ripple" [ref=e734]
+              - button "Link" [ref=e735]
+              - button "Unlink" [ref=e736]
+              - button "Relink" [disabled] [ref=e737]
+              - button "+V" [ref=e738]
+              - button "+A" [ref=e739]
+              - button "+Black" [ref=e740]
+              - button "+Color" [ref=e741]
+              - button "+Adj" [ref=e742]
+              - button "-" [ref=e743]
+              - generic "Visible span" [ref=e744]: 00:00:04
+              - button "+" [ref=e745]
+              - button "Fit All" [ref=e746]
+              - button "PM" [ref=e747]
+              - button "M+" [ref=e748]
+              - button "NM" [ref=e749]
+              - generic [ref=e750]: 0m
+            - generic [ref=e751]: 00:00:00:00
+        - generic [ref=e752]:
+          - generic [ref=e753]:
+            - generic [ref=e756]:
+              - button "V2" [ref=e757]
+              - generic [ref=e758]:
+                - button "M" [ref=e759]
+                - button "S" [ref=e760]
+                - button "Lk" [ref=e761]
+                - button "SY" [ref=e762]
+            - generic [ref=e764]:
+              - button "V1" [ref=e765]
+              - generic [ref=e766]:
+                - button "M" [ref=e767]
+                - button "S" [ref=e768]
+                - button "Lk" [ref=e769]
+                - button "SY" [ref=e770]
+            - generic [ref=e772]:
+              - button "A1" [ref=e773]
+              - generic [ref=e774]:
+                - button "M" [ref=e775]
+                - button "S" [ref=e776]
+                - button "Lk" [ref=e777]
+                - button "SY" [ref=e778]
+                - button "CH" [ref=e779]
+                - 'generic "Audio routing: Stereo" [ref=e780]': ST
+            - generic [ref=e782]:
+              - button "A2" [ref=e783]
+              - generic [ref=e784]:
+                - button "M" [ref=e785]
+                - button "S" [ref=e786]
+                - button "Lk" [ref=e787]
+                - button "SY" [ref=e788]
+                - button "CH" [ref=e789]
+                - 'generic "Audio routing: Stereo" [ref=e790]': ST
+            - generic [ref=e791]:
+              - button "+V" [ref=e792]
+              - button "+A" [ref=e793]
+          - generic [ref=e795]:
+            - generic [ref=e796] [cursor=pointer]:
+              - generic [ref=e797]: 0:00
+              - generic [ref=e802]: 0:05
+              - generic [ref=e807]: 0:10
+              - generic [ref=e812]: 0:15
+              - generic [ref=e817]: 0:20
+              - generic [ref=e822]: 0:25
+              - generic [ref=e827]: 0:30
+              - generic [ref=e832]: 0:35
+              - generic [ref=e837]: 0:40
+            - generic [ref=e840]:
+              - generic [ref=e841]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (2)
+              - generic [ref=e844]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (2)
+              - generic [ref=e847]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (2)
+              - generic [ref=e850]:
+                - generic:
+                  - generic: ___202602101929_1fyc8.mp4
+            - generic [ref=e853]:
+              - generic [ref=e854]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (Audio) (2)
+              - generic [ref=e857]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (Audio) (2)
+              - generic [ref=e860]:
+                - generic:
+                  - generic: ___202602101929_7wkz6.mp4 (Audio) (2)
+              - generic [ref=e863]:
+                - generic:
+                  - generic: ___202602101929_1fyc8.mp4 (Audio)
+          - complementary [ref=e870]:
+            - generic [ref=e871]:
+              - generic [ref=e874]: L
+              - generic [ref=e877]: R
+              - generic:
+                - generic: "0"
+                - generic: "-6"
+                - generic: "-12"
+                - generic: "-18"
+                - generic: "-24"
+                - generic: "-36"
+                - generic: "-48"
+    - complementary [ref=e879]:
+      - generic [ref=e880]:
+        - heading "Inspector" [level=2] [ref=e881]
+        - button "▶" [ref=e882]
+      - generic [ref=e883]:
+        - heading "Clip" [level=3] [ref=e884]
+        - generic [ref=e885]:
+          - generic [ref=e886]:
+            - generic [ref=e887]: Name
+            - generic [ref=e888]: ___202602101929_7wkz6.mp4 (2)
+          - generic [ref=e889]:
+            - generic [ref=e890]: Type
+            - generic [ref=e891]: video
+          - generic [ref=e892]:
+            - generic [ref=e893]: Track
+            - generic [ref=e894]: V1
+      - generic [ref=e895]:
+        - button "Transform ▾" [ref=e896]:
+          - generic [ref=e897]: Transform
+          - generic [ref=e898]: ▾
+        - generic [ref=e899]:
+          - generic [ref=e900]:
+            - button "Reset" [ref=e901]
+            - button "⇋" [ref=e902]
+            - button "⇵" [ref=e903]
+            - button "Fit" [ref=e904]
+            - button "AutoKey" [ref=e905]
+          - generic [ref=e906]:
+            - generic [ref=e907]:
+              - generic [ref=e908]: Position X
+              - spinbutton "0 px" [ref=e909]: "0"
+            - generic [ref=e910]:
+              - button "Enable Position X keyframes and add keyframe at playhead" [ref=e912]:
+                - img [ref=e913]
+              - slider [ref=e916]: "0"
+              - generic [ref=e917]:
+                - button "Previous Position X keyframe" [disabled] [ref=e918]:
+                  - img [ref=e919]
+                - generic [ref=e921]: 0f
+                - button "Add/update Position X keyframe at playhead" [ref=e922]:
+                  - img [ref=e923]
+                - button "Next Position X keyframe" [disabled] [ref=e926]:
+                  - img [ref=e927]
+            - generic [ref=e929]: 0 px
+          - generic [ref=e930]:
+            - generic [ref=e931]:
+              - generic [ref=e932]: Position Y
+              - spinbutton "-2 px" [ref=e933]: "-2"
+            - generic [ref=e934]:
+              - button "Enable Position Y keyframes and add keyframe at playhead" [ref=e936]:
+                - img [ref=e937]
+              - slider [ref=e940]: "-2"
+              - generic [ref=e941]:
+                - button "Previous Position Y keyframe" [disabled] [ref=e942]:
+                  - img [ref=e943]
+                - generic [ref=e945]: 0f
+                - button "Add/update Position Y keyframe at playhead" [ref=e946]:
+                  - img [ref=e947]
+                - button "Next Position Y keyframe" [disabled] [ref=e950]:
+                  - img [ref=e951]
+            - generic [ref=e953]: "-2 px"
+          - generic [ref=e954]:
+            - generic [ref=e955]: Link W/H
+            - button "Linked" [ref=e956]
+          - generic [ref=e957]:
+            - generic [ref=e958]:
+              - generic [ref=e959]: Width
+              - spinbutton "1765 px" [ref=e960]: "1765"
+            - generic [ref=e961]:
+              - button "Disable Width keyframes (with confirmation)" [ref=e963]:
+                - img [ref=e964]
+              - slider [ref=e967]: "1765"
+              - generic [ref=e968]:
+                - button "Previous Width keyframe" [ref=e969]:
+                  - img [ref=e970]
+                - generic [ref=e972]: 0f
+                - button "Add/update Width keyframe at playhead" [ref=e973]:
+                  - img [ref=e974]
+                - button "Next Width keyframe" [ref=e977]:
+                  - img [ref=e978]
+            - generic [ref=e980]: 1765 px
+          - generic [ref=e981]:
+            - generic [ref=e982]:
+              - generic [ref=e983]: Height
+              - spinbutton "993 px" [ref=e984]: "993"
+            - generic [ref=e985]:
+              - button "Disable Height keyframes (with confirmation)" [ref=e987]:
+                - img [ref=e988]
+              - slider [ref=e991]: "993"
+              - generic [ref=e992]:
+                - button "Previous Height keyframe" [ref=e993]:
+                  - img [ref=e994]
+                - generic [ref=e996]: 0f
+                - button "Add/update Height keyframe at playhead" [ref=e997]:
+                  - img [ref=e998]
+                - button "Next Height keyframe" [ref=e1001]:
+                  - img [ref=e1002]
+            - generic [ref=e1004]: 993 px
+          - generic [ref=e1005]:
+            - generic [ref=e1006]:
+              - generic [ref=e1007]: Rotation
+              - spinbutton "-16 deg" [ref=e1008]: "-16"
+            - generic [ref=e1009]:
+              - button "Enable Rotation keyframes and add keyframe at playhead" [ref=e1011]:
+                - img [ref=e1012]
+              - slider [ref=e1015]: "-16"
+              - generic [ref=e1016]:
+                - button "Previous Rotation keyframe" [disabled] [ref=e1017]:
+                  - img [ref=e1018]
+                - generic [ref=e1020]: 0f
+                - button "Add/update Rotation keyframe at playhead" [ref=e1021]:
+                  - img [ref=e1022]
+                - button "Next Rotation keyframe" [disabled] [ref=e1025]:
+                  - img [ref=e1026]
+            - generic [ref=e1028]: "-16 deg"
+          - generic [ref=e1029]:
+            - generic [ref=e1030]:
+              - generic [ref=e1031]: Opacity
+              - spinbutton "100%" [ref=e1032]: "100"
+            - generic [ref=e1033]:
+              - button "Enable Opacity keyframes and add keyframe at playhead" [ref=e1035]:
+                - img [ref=e1036]
+              - slider [ref=e1039]: "100"
+              - generic [ref=e1040]:
+                - button "Previous Opacity keyframe" [disabled] [ref=e1041]:
+                  - img [ref=e1042]
+                - generic [ref=e1044]: 0f
+                - button "Add/update Opacity keyframe at playhead" [ref=e1045]:
+                  - img [ref=e1046]
+                - button "Next Opacity keyframe" [disabled] [ref=e1049]:
+                  - img [ref=e1050]
+            - generic [ref=e1052]: 100%
+      - button "Speed ▸" [ref=e1054]:
+        - generic [ref=e1055]: Speed
+        - generic [ref=e1056]: ▸
+      - button "Color ▸" [ref=e1058]:
+        - generic [ref=e1059]: Color
+        - generic [ref=e1060]: ▸
+      - button "Compositing ▸" [ref=e1062]:
+        - generic [ref=e1063]: Compositing
+        - generic [ref=e1064]: ▸
+      - button "Transitions ▸" [ref=e1066]:
+        - generic [ref=e1067]: Transitions
+        - generic [ref=e1068]: ▸
+      - button "Masks ▸" [ref=e1070]:
+        - generic [ref=e1071]: Masks
+        - generic [ref=e1072]: ▸
+      - button "Audio ▸" [ref=e1074]:
+        - generic [ref=e1075]: Audio
+        - generic [ref=e1076]: ▸
+      - generic [ref=e1077]:
+        - heading "Timing" [level=3] [ref=e1078]
+        - generic [ref=e1079]:
+          - generic [ref=e1080]:
+            - generic [ref=e1081]: Start
+            - generic [ref=e1082]: 00:00:00:00
+          - generic [ref=e1083]:
+            - generic [ref=e1084]: Duration
+            - generic [ref=e1085]: 00:00:00:22
+          - generic [ref=e1086]:
+            - generic [ref=e1087]: End
+            - generic [ref=e1088]: 00:00:00:22
+      - generic [ref=e1089]:
+        - heading "Media" [level=3] [ref=e1090]
+        - generic [ref=e1091]:
+          - generic [ref=e1092]:
+            - generic [ref=e1093]: File
+            - generic [ref=e1094]: ___202602101929_7wkz6.mp4
+          - generic [ref=e1095]:
+            - generic [ref=e1096]: Resolution
+            - generic [ref=e1097]: 1280x720
+          - generic [ref=e1098]:
+            - generic [ref=e1099]: Duration
+            - generic [ref=e1100]: 8.00s
+  - contentinfo [ref=e1101]:
+    - generic [ref=e1102]:
+      - generic [ref=e1103]: Ready
+      - generic [ref=e1104]: 1 clip selected
+      - generic [ref=e1105]: "Tool: Select"
+      - generic [ref=e1106]: Linked
+    - generic [ref=e1107]:
+      - generic [ref=e1108]: 1280×720 • 24fps
+      - generic [ref=e1109]: 4 assets
+      - generic [ref=e1110]: "Space: play • J/K/L: shuttle • ←/→: 1f • ↑/↓: cuts • Home/End • C/V • M/[ ]"

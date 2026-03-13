@@ -12,7 +12,7 @@ import type {
 import { api } from '../lib/api.js';
 import { adaptSequence } from '../lib/timelineAdapter.js';
 import { buildCompositionPlan } from '../lib/core.js';
-import { applyKeyframeEasing } from '../lib/keyframeEasing.js';
+import { evaluateClipNumericKeyframe, resolveClipSourceTimeSec } from '../lib/clipKeyframes.js';
 import { WebGL2LayerComposer } from '../lib/webgl/composer.js';
 
 interface ActiveLayer {
@@ -20,6 +20,7 @@ interface ActiveLayer {
   trackIndex: number;
   clipLocalFrame: number;
   sourceTimeSec: number;
+  speed: number;
   opacity: number;
   positionX: number;
   positionY: number;
@@ -28,6 +29,11 @@ interface ActiveLayer {
   rotation: number;
   anchorX: number;
   anchorY: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  hue: number;
+  vignette: number;
   blendMode: TimelineClipData['blendMode'];
   transitionProgress: number | null;
   transitionType: 'cross-dissolve' | 'fade-black' | null;
@@ -55,6 +61,9 @@ interface LayerGeometry {
 interface MaskOverlayInfo {
   clipId: string;
   maskId: string;
+  maskIndex: number;
+  color: string;
+  isActive: boolean;
   frame: number;
   points: MaskPoint[];
   normalized: boolean;
@@ -74,6 +83,15 @@ interface RendererStatus {
   backend: 'canvas2d' | 'webgl2';
   reason: string | null;
 }
+
+const MASK_OUTLINE_COLORS = [
+  '#22d3ee',
+  '#f59e0b',
+  '#a78bfa',
+  '#4ade80',
+  '#f87171',
+  '#60a5fa',
+];
 
 function pad(n: number): string {
   return n.toString().padStart(2, '0');
@@ -187,6 +205,64 @@ function pointInPolygon(px: number, py: number, polygon: Array<{ x: number; y: n
     if (intersects) inside = !inside;
   }
   return inside;
+}
+
+function getMaskOutlineColor(index: number): string {
+  return MASK_OUTLINE_COLORS[index % MASK_OUTLINE_COLORS.length] ?? '#22d3ee';
+}
+
+function pointHandleDistance(pointX: number, pointY: number, handleX: number, handleY: number): number {
+  return Math.hypot(handleX - pointX, handleY - pointY);
+}
+
+function isCornerMaskPoint(point: MaskPoint): boolean {
+  return (
+    pointHandleDistance(point.x, point.y, point.inX, point.inY) < 0.75 &&
+    pointHandleDistance(point.x, point.y, point.outX, point.outY) < 0.75
+  );
+}
+
+function cloneMaskPoints(points: MaskPoint[]): MaskPoint[] {
+  return points.map((point) => ({ ...point }));
+}
+
+function toggleMaskPointCurve(points: MaskPoint[], pointIndex: number, closed: boolean): MaskPoint[] {
+  const nextPoints = cloneMaskPoints(points);
+  const current = nextPoints[pointIndex];
+  if (!current) return nextPoints;
+
+  if (!isCornerMaskPoint(current)) {
+    current.inX = current.x;
+    current.inY = current.y;
+    current.outX = current.x;
+    current.outY = current.y;
+    nextPoints[pointIndex] = current;
+    return nextPoints;
+  }
+
+  const pointCount = nextPoints.length;
+  const prevIndex = closed ? (pointIndex - 1 + pointCount) % pointCount : Math.max(0, pointIndex - 1);
+  const nextIndex = closed ? (pointIndex + 1) % pointCount : Math.min(pointCount - 1, pointIndex + 1);
+  const prevPoint = nextPoints[prevIndex];
+  const nextPoint = nextPoints[nextIndex];
+  const tangentX = nextPoint.x - prevPoint.x;
+  const tangentY = nextPoint.y - prevPoint.y;
+  const tangentLength = Math.hypot(tangentX, tangentY);
+  if (tangentLength < 1e-5) {
+    return nextPoints;
+  }
+
+  const unitX = tangentX / tangentLength;
+  const unitY = tangentY / tangentLength;
+  const prevDistance = Math.hypot(current.x - prevPoint.x, current.y - prevPoint.y);
+  const nextDistance = Math.hypot(nextPoint.x - current.x, nextPoint.y - current.y);
+  const handleLength = Math.max(4, Math.min(prevDistance, nextDistance, tangentLength) / 3);
+  current.inX = current.x - unitX * handleLength;
+  current.inY = current.y - unitY * handleLength;
+  current.outX = current.x + unitX * handleLength;
+  current.outY = current.y + unitY * handleLength;
+  nextPoints[pointIndex] = current;
+  return nextPoints;
 }
 
 function maskPointsAreNormalized(points: MaskPoint[]): boolean {
@@ -311,33 +387,6 @@ function resolveGeneratorColor(clip: TimelineClipData): string | null {
     return '#000000';
   }
   return null;
-}
-
-function evaluateClipNumericKeyframe(
-  clip: TimelineClipData,
-  property: 'mask.opacity' | 'mask.feather' | 'mask.expansion',
-  clipLocalFrame: number,
-  defaultValue: number,
-): number {
-  const source = (clip.keyframes ?? [])
-    .filter((kf) => kf.property === property)
-    .sort((a, b) => a.frame - b.frame);
-  if (source.length === 0) return defaultValue;
-  if (source.length === 1) return source[0].value;
-  if (clipLocalFrame <= source[0].frame) return source[0].value;
-  const last = source[source.length - 1];
-  if (clipLocalFrame >= last.frame) return last.value;
-
-  for (let i = 0; i < source.length - 1; i++) {
-    const from = source[i];
-    const to = source[i + 1];
-    if (clipLocalFrame < from.frame || clipLocalFrame > to.frame) continue;
-    const span = Math.max(1, to.frame - from.frame);
-    const t = (clipLocalFrame - from.frame) / span;
-    const eased = applyKeyframeEasing(t, from.easing, from.bezierHandles);
-    return from.value + (to.value - from.value) * eased;
-  }
-  return defaultValue;
 }
 
 function resolveMaskShapeAtFrame(
@@ -524,16 +573,23 @@ function applyClipMasks(
     );
     if (opacity <= 0.0001) return;
     const featherPx = Math.max(0, (entry.mask.feather + keyframedMaskFeather) * sourceScale);
-    const expansionPx = Math.max(
-      0,
-      (entry.mask.expansion + keyframedMaskExpansion) * sourceScale,
-    );
-    maskCtx.globalCompositeOperation = composite;
-    maskCtx.globalAlpha = opacity;
-    maskCtx.filter = featherPx > 0.1 ? `blur(${featherPx.toFixed(2)}px)` : 'none';
-    maskCtx.fillStyle = '#fff';
-    maskCtx.strokeStyle = '#fff';
-    drawMaskPath(maskCtx, entry.points, {
+    const expansionPx = (entry.mask.expansion + keyframedMaskExpansion) * sourceScale;
+
+    const tempCanvas = maskCtx.canvas.ownerDocument?.createElement('canvas') ?? document.createElement('canvas');
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+    const tempCtx = tempCanvas.getContext('2d');
+    if (!tempCtx) return;
+
+    tempCtx.save();
+    tempCtx.setTransform(1, 0, 0, 1, 0, 0);
+    tempCtx.clearRect(0, 0, w, h);
+    tempCtx.setTransform(transform);
+    tempCtx.globalAlpha = opacity;
+    tempCtx.filter = featherPx > 0.1 ? `blur(${featherPx.toFixed(2)}px)` : 'none';
+    tempCtx.fillStyle = '#fff';
+    tempCtx.strokeStyle = '#fff';
+    drawMaskPath(tempCtx, entry.points, {
       drawX: geometry.drawX,
       drawY: geometry.drawY,
       drawWidth: geometry.drawWidth,
@@ -543,19 +599,26 @@ function applyClipMasks(
       closed: entry.mask.closed,
     });
     if (entry.mask.closed) {
-      maskCtx.fill();
+      tempCtx.fill();
     } else {
-      maskCtx.lineWidth = Math.max(1, 2 + expansionPx * 2);
-      maskCtx.lineJoin = 'round';
-      maskCtx.lineCap = 'round';
-      maskCtx.stroke();
+      tempCtx.lineWidth = Math.max(0.5, 2 + expansionPx * 2);
+      tempCtx.lineJoin = 'round';
+      tempCtx.lineCap = 'round';
+      tempCtx.stroke();
     }
-    if (expansionPx > 0.1) {
-      maskCtx.lineWidth = Math.max(1, expansionPx * 2);
-      maskCtx.lineJoin = 'round';
-      maskCtx.lineCap = 'round';
-      maskCtx.stroke();
+    if (entry.mask.closed && Math.abs(expansionPx) > 0.1) {
+      tempCtx.lineWidth = Math.max(1, Math.abs(expansionPx) * 2);
+      tempCtx.lineJoin = 'round';
+      tempCtx.lineCap = 'round';
+      tempCtx.globalCompositeOperation = expansionPx > 0 ? 'source-over' : 'destination-out';
+      tempCtx.stroke();
     }
+    tempCtx.restore();
+
+    maskCtx.globalCompositeOperation = composite;
+    maskCtx.globalAlpha = 1;
+    maskCtx.filter = 'none';
+    maskCtx.drawImage(tempCanvas, 0, 0);
   };
 
   for (const entry of addMasks) paintMask(entry, 'source-over');
@@ -610,6 +673,7 @@ export function ProgramMonitor() {
   } | null>(null);
 
   const maskOverlayRef = useRef<MaskOverlayInfo | null>(null);
+  const maskOverlaysRef = useRef<MaskOverlayInfo[]>([]);
   const maskDragRef = useRef<{
     mode:
       | 'point'
@@ -653,7 +717,6 @@ export function ProgramMonitor() {
 
   const [maskEditMode, setMaskEditMode] = useState(false);
   const [maskOnionSkinEnabled, setMaskOnionSkinEnabled] = useState(true);
-  const [activeMaskId, setActiveMaskId] = useState<string | null>(null);
   const [selectedMaskPoint, setSelectedMaskPoint] = useState<{
     clipId: string;
     maskId: string;
@@ -706,6 +769,9 @@ export function ProgramMonitor() {
   const setActivePanel = useSelectionStore((s) => s.setActivePanel);
   const rendererMode = useSelectionStore((s) => s.rendererMode);
   const setRendererMode = useSelectionStore((s) => s.setRendererMode);
+  const activeMaskClipId = useSelectionStore((s) => s.activeMaskClipId);
+  const activeMaskId = useSelectionStore((s) => s.activeMaskId);
+  const setActiveMaskSelection = useSelectionStore((s) => s.setActiveMaskSelection);
 
   const activeLayers = useMemo(() => {
     const seq = sequences[0];
@@ -740,15 +806,42 @@ export function ProgramMonitor() {
       .map((layer) => {
         const clip = clipById.get(layer.clipId);
         if (!clip) return null;
-        const sourceFps = layer.sourceTime.rate.num / layer.sourceTime.rate.den;
+        const clipLocalFrame = Math.max(
+          0,
+          Math.min(clip.durationFrames, currentFrame - clip.startFrame),
+        );
+        const speed = evaluateClipNumericKeyframe(clip, 'speed', clipLocalFrame, clip.speed ?? 1);
+        const brightness = evaluateClipNumericKeyframe(
+          clip,
+          'brightness',
+          clipLocalFrame,
+          clip.brightness ?? 1,
+        );
+        const contrast = evaluateClipNumericKeyframe(
+          clip,
+          'contrast',
+          clipLocalFrame,
+          clip.contrast ?? 1,
+        );
+        const saturation = evaluateClipNumericKeyframe(
+          clip,
+          'saturation',
+          clipLocalFrame,
+          clip.saturation ?? 1,
+        );
+        const hue = evaluateClipNumericKeyframe(clip, 'hue', clipLocalFrame, clip.hue ?? 0);
+        const vignette = evaluateClipNumericKeyframe(
+          clip,
+          'vignette',
+          clipLocalFrame,
+          clip.vignette ?? 0,
+        );
         return {
           clip,
           trackIndex: trackIndexById.get(layer.trackId) ?? 0,
-          clipLocalFrame: Math.max(
-            0,
-            Math.min(clip.durationFrames, currentFrame - clip.startFrame),
-          ),
-          sourceTimeSec: sourceFps > 0 ? layer.sourceTime.frames / sourceFps : 0,
+          clipLocalFrame,
+          sourceTimeSec: resolveClipSourceTimeSec(clip, clipLocalFrame, fps),
+          speed,
           opacity: layer.opacity,
           positionX: layer.transform.positionX,
           positionY: layer.transform.positionY,
@@ -757,6 +850,11 @@ export function ProgramMonitor() {
           rotation: layer.transform.rotation,
           anchorX: layer.transform.anchorX,
           anchorY: layer.transform.anchorY,
+          brightness,
+          contrast,
+          saturation,
+          hue,
+          vignette,
           blendMode: layer.blendMode,
           transitionProgress: layer.transitionProgress,
           transitionType: layer.transitionType,
@@ -781,18 +879,28 @@ export function ProgramMonitor() {
   const activeMask = useMemo(() => {
     const masks = controlledLayer?.clip.masks ?? [];
     if (!masks.length) return null;
-    return masks.find((m) => m.id === activeMaskId) ?? masks[0] ?? null;
-  }, [controlledLayer?.clip.id, controlledLayer?.clip.masks, activeMaskId]);
+    const effectiveMaskId =
+      controlledLayer?.clip.id != null && activeMaskClipId === controlledLayer.clip.id ? activeMaskId : null;
+    return masks.find((m) => m.id === effectiveMaskId) ?? masks[0] ?? null;
+  }, [controlledLayer?.clip.id, controlledLayer?.clip.masks, activeMaskClipId, activeMaskId]);
 
   useEffect(() => {
     if (!activeMask) {
-      setActiveMaskId(null);
+      if (controlledLayer?.clip.id && activeMaskClipId === controlledLayer.clip.id) {
+        setActiveMaskSelection(null, null);
+      }
       return;
     }
-    if (activeMask.id !== activeMaskId) {
-      setActiveMaskId(activeMask.id);
+    if (controlledLayer?.clip.id && (activeMaskClipId !== controlledLayer.clip.id || activeMask.id !== activeMaskId)) {
+      setActiveMaskSelection(controlledLayer.clip.id, activeMask.id);
     }
-  }, [activeMask, activeMaskId]);
+  }, [
+    activeMask,
+    activeMaskClipId,
+    activeMaskId,
+    controlledLayer?.clip.id,
+    setActiveMaskSelection,
+  ]);
 
   useEffect(() => {
     const sel = selectedMaskPoint;
@@ -1049,6 +1157,7 @@ export function ProgramMonitor() {
 
     let drewAny = false;
     maskOverlayRef.current = null;
+    maskOverlaysRef.current = [];
 
     for (const layer of activeLayers) {
       const generatorColor = resolveGeneratorColor(layer.clip);
@@ -1067,7 +1176,7 @@ export function ProgramMonitor() {
         st.desired = layer.sourceTimeSec;
         seekStateRef.current.set(layer.clip.id, st);
 
-        const clipSpeed = layer.clip.speed ?? 1;
+        const clipSpeed = layer.speed ?? 1;
         const forwardShuttlePlay = isPlaying && shuttleSpeed > 0 && clipSpeed > 0;
 
         if (forwardShuttlePlay) {
@@ -1132,11 +1241,11 @@ export function ProgramMonitor() {
       const rot = layer.rotation ?? 0;
       const transitionMix = resolveTransitionVisualMix(layer);
       const opacity = Math.max(0, Math.min(1, layer.opacity ?? 1));
-      const brightness = Math.max(0, layer.clip.brightness ?? 1);
-      const contrast = Math.max(0, layer.clip.contrast ?? 1);
-      const saturation = Math.max(0, layer.clip.saturation ?? 1);
-      const hue = layer.clip.hue ?? 0;
-      const vignette = Math.max(-1, Math.min(1, layer.clip.vignette ?? 0));
+      const brightness = Math.max(0, layer.brightness ?? 1);
+      const contrast = Math.max(0, layer.contrast ?? 1);
+      const saturation = Math.max(0, layer.saturation ?? 1);
+      const hue = layer.hue ?? 0;
+      const vignette = Math.max(-1, Math.min(1, layer.vignette ?? 0));
       const blendMode = layer.blendMode ?? layer.clip.blendMode ?? 'normal';
 
       let layerCanvas = layerCanvasRef.current;
@@ -1297,9 +1406,10 @@ export function ProgramMonitor() {
       ctx.restore();
     }
 
-    if (maskEditMode && !isPlaying && controlledLayer && activeMask) {
+    if (maskEditMode && !isPlaying && controlledLayer) {
       const geometry = getLayerGeometry(controlledLayer);
-      if (geometry) {
+      const clipMasks = controlledLayer.clip.masks ?? [];
+      if (geometry && clipMasks.length > 0) {
         const drawOnionShape = (
           shapePoints: MaskPoint[],
           strokeStyle: string,
@@ -1341,7 +1451,7 @@ export function ProgramMonitor() {
               screen[i].y,
             );
           }
-          if (activeMask.closed) {
+          if (activeMask?.closed) {
             const last = screen.length - 1;
             ctx.bezierCurveTo(
               screenOutShape[last].x,
@@ -1357,7 +1467,7 @@ export function ProgramMonitor() {
           ctx.restore();
         };
 
-        if (maskOnionSkinEnabled) {
+        if (maskOnionSkinEnabled && activeMask) {
           const sortedMaskKeyframes = [...(activeMask.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
           const localFrame = controlledLayer.clipLocalFrame;
           const prevKeyframe = [...sortedMaskKeyframes].reverse().find((kf) => kf.frame < localFrame) ?? null;
@@ -1370,17 +1480,20 @@ export function ProgramMonitor() {
           }
         }
 
-        const preview = maskPreviewRef.current;
-        const hasPreview =
-          preview &&
-          preview.clipId === controlledLayer.clip.id &&
-          preview.maskId === activeMask.id &&
-          preview.frame === controlledLayer.clipLocalFrame;
-        const points = hasPreview
-          ? preview.points.map((p) => ({ ...p }))
-          : resolveMaskShapeAtFrame(activeMask, controlledLayer.clipLocalFrame);
+        const overlays: MaskOverlayInfo[] = [];
 
-        if (points.length >= 2) {
+        clipMasks.forEach((mask, maskIndex) => {
+          const preview = maskPreviewRef.current;
+          const hasPreview =
+            preview &&
+            preview.clipId === controlledLayer.clip.id &&
+            preview.maskId === mask.id &&
+            preview.frame === controlledLayer.clipLocalFrame;
+          const points = hasPreview
+            ? preview.points.map((p) => ({ ...p }))
+            : resolveMaskShapeAtFrame(mask, controlledLayer.clipLocalFrame);
+          if (points.length < 2) return;
+
           const normalized = maskPointsAreNormalized(points);
           const screenPoints = points.map((p) => mapMaskPointToCanvas(p, geometry, normalized));
           const screenIn = points.map((p) =>
@@ -1397,16 +1510,20 @@ export function ProgramMonitor() {
               normalized,
             ),
           );
+          const isActive = mask.id === activeMask?.id;
+          const color = getMaskOutlineColor(maskIndex);
           const selectedPointIndex =
+            isActive &&
             selectedMaskPoint?.clipId === controlledLayer.clip.id &&
-            selectedMaskPoint?.maskId === activeMask.id
+            selectedMaskPoint?.maskId === mask.id
               ? selectedMaskPoint.pointIndex
               : -1;
 
           ctx.save();
-          ctx.strokeStyle = '#22d3ee';
-          ctx.lineWidth = 1.4;
-          ctx.setLineDash([5, 4]);
+          ctx.globalAlpha = isActive ? 1 : 0.72;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = isActive ? 1.7 : 1.15;
+          ctx.setLineDash(isActive ? [5, 4] : [4, 4]);
           ctx.beginPath();
           ctx.moveTo(screenPoints[0].x, screenPoints[0].y);
           for (let i = 1; i < screenPoints.length; i++) {
@@ -1420,7 +1537,7 @@ export function ProgramMonitor() {
               screenPoints[i].y,
             );
           }
-          if (activeMask.closed) {
+          if (mask.closed) {
             const last = screenPoints.length - 1;
             ctx.bezierCurveTo(
               screenOut[last].x,
@@ -1436,51 +1553,11 @@ export function ProgramMonitor() {
           ctx.setLineDash([]);
 
           for (let i = 0; i < screenPoints.length; i++) {
-            const isSelected = i === selectedPointIndex;
             const point = screenPoints[i];
-            const inHandle = screenIn[i];
-            const outHandle = screenOut[i];
-            const inLen = Math.hypot(inHandle.x - point.x, inHandle.y - point.y);
-            const outLen = Math.hypot(outHandle.x - point.x, outHandle.y - point.y);
-            ctx.strokeStyle = isSelected ? '#93c5fd' : 'rgba(147, 197, 253, 0.5)';
-            ctx.lineWidth = isSelected ? 1.2 : 0.9;
-            if (inLen > 0.75) {
-              ctx.beginPath();
-              ctx.moveTo(point.x, point.y);
-              ctx.lineTo(inHandle.x, inHandle.y);
-              ctx.stroke();
-            }
-            if (outLen > 0.75) {
-              ctx.beginPath();
-              ctx.moveTo(point.x, point.y);
-              ctx.lineTo(outHandle.x, outHandle.y);
-              ctx.stroke();
-            }
-            if (inLen > 0.75 || isSelected) {
-              ctx.beginPath();
-              ctx.fillStyle = isSelected ? '#bfdbfe' : '#38bdf8';
-              ctx.arc(inHandle.x, inHandle.y, isSelected ? 3.8 : 3.1, 0, Math.PI * 2);
-              ctx.fill();
-              ctx.lineWidth = 1;
-              ctx.strokeStyle = '#082f49';
-              ctx.stroke();
-            }
-            if (outLen > 0.75 || isSelected) {
-              ctx.beginPath();
-              ctx.fillStyle = isSelected ? '#fed7aa' : '#f59e0b';
-              ctx.arc(outHandle.x, outHandle.y, isSelected ? 3.8 : 3.1, 0, Math.PI * 2);
-              ctx.fill();
-              ctx.lineWidth = 1;
-              ctx.strokeStyle = '#1c1917';
-              ctx.stroke();
-            }
-          }
-
-          for (let i = 0; i < screenPoints.length; i++) {
             const isSelected = i === selectedPointIndex;
             ctx.beginPath();
-            ctx.fillStyle = isSelected ? '#fef08a' : '#67e8f9';
-            ctx.arc(screenPoints[i].x, screenPoints[i].y, isSelected ? 5 : 4, 0, Math.PI * 2);
+            ctx.fillStyle = isSelected ? '#fef08a' : color;
+            ctx.arc(point.x, point.y, isActive ? (isSelected ? 4.8 : 4) : 3.2, 0, Math.PI * 2);
             ctx.fill();
             ctx.lineWidth = 1;
             ctx.strokeStyle = '#082f49';
@@ -1503,7 +1580,7 @@ export function ProgramMonitor() {
             const d = Math.hypot(pt.x - centerScreen.x, pt.y - centerScreen.y);
             return Math.max(max, d);
           }, 0);
-          const gizmoRadius = Math.max(30, boundsRadius + 16);
+          const gizmoRadius = Math.max(22, boundsRadius + 8);
           const scaleHandleScreen = {
             x: centerScreen.x + gizmoRadius,
             y: centerScreen.y,
@@ -1513,43 +1590,82 @@ export function ProgramMonitor() {
             y: centerScreen.y - gizmoRadius,
           };
 
-          ctx.setLineDash([3, 3]);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.moveTo(centerScreen.x, centerScreen.y);
-          ctx.lineTo(scaleHandleScreen.x, scaleHandleScreen.y);
-          ctx.moveTo(centerScreen.x, centerScreen.y);
-          ctx.lineTo(rotateHandleScreen.x, rotateHandleScreen.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
+          if (isActive) {
+            for (let i = 0; i < screenPoints.length; i++) {
+              const point = points[i];
+              if (!point || isCornerMaskPoint(point)) continue;
+              const isSelected = i === selectedPointIndex;
+              const screenPoint = screenPoints[i];
+              const inHandle = screenIn[i];
+              const outHandle = screenOut[i];
 
-          ctx.beginPath();
-          ctx.fillStyle = '#0f172a';
-          ctx.arc(centerScreen.x, centerScreen.y, 3.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.lineWidth = 1;
-          ctx.strokeStyle = '#67e8f9';
-          ctx.stroke();
+              ctx.strokeStyle = isSelected ? '#93c5fd' : 'rgba(147, 197, 253, 0.6)';
+              ctx.lineWidth = isSelected ? 1.2 : 0.9;
+              ctx.beginPath();
+              ctx.moveTo(screenPoint.x, screenPoint.y);
+              ctx.lineTo(inHandle.x, inHandle.y);
+              ctx.moveTo(screenPoint.x, screenPoint.y);
+              ctx.lineTo(outHandle.x, outHandle.y);
+              ctx.stroke();
 
-          ctx.fillStyle = '#22d3ee';
-          ctx.fillRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
-          ctx.strokeStyle = '#082f49';
-          ctx.strokeRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
+              ctx.beginPath();
+              ctx.fillStyle = '#bfdbfe';
+              ctx.arc(inHandle.x, inHandle.y, isSelected ? 3.8 : 3.1, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.lineWidth = 1;
+              ctx.strokeStyle = '#082f49';
+              ctx.stroke();
 
-          ctx.beginPath();
-          ctx.fillStyle = '#f59e0b';
-          ctx.arc(rotateHandleScreen.x, rotateHandleScreen.y, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.lineWidth = 1;
-          ctx.strokeStyle = '#1c1917';
-          ctx.stroke();
+              ctx.beginPath();
+              ctx.fillStyle = '#fed7aa';
+              ctx.arc(outHandle.x, outHandle.y, isSelected ? 3.8 : 3.1, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.lineWidth = 1;
+              ctx.strokeStyle = '#1c1917';
+              ctx.stroke();
+            }
+
+            ctx.setLineDash([3, 3]);
+            ctx.strokeStyle = '#38bdf8';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(centerScreen.x, centerScreen.y);
+            ctx.lineTo(scaleHandleScreen.x, scaleHandleScreen.y);
+            ctx.moveTo(centerScreen.x, centerScreen.y);
+            ctx.lineTo(rotateHandleScreen.x, rotateHandleScreen.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            ctx.beginPath();
+            ctx.fillStyle = '#0f172a';
+            ctx.arc(centerScreen.x, centerScreen.y, 3.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#67e8f9';
+            ctx.stroke();
+
+            ctx.fillStyle = '#22d3ee';
+            ctx.fillRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
+            ctx.strokeStyle = '#082f49';
+            ctx.strokeRect(scaleHandleScreen.x - 4, scaleHandleScreen.y - 4, 8, 8);
+
+            ctx.beginPath();
+            ctx.fillStyle = '#f59e0b';
+            ctx.arc(rotateHandleScreen.x, rotateHandleScreen.y, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = '#1c1917';
+            ctx.stroke();
+          }
 
           ctx.restore();
 
-          maskOverlayRef.current = {
+          const overlay: MaskOverlayInfo = {
             clipId: controlledLayer.clip.id,
-            maskId: activeMask.id,
+            maskId: mask.id,
+            maskIndex,
+            color,
+            isActive,
             frame: controlledLayer.clipLocalFrame,
             points: points.map((p) => ({ ...p })),
             normalized,
@@ -1562,8 +1678,18 @@ export function ProgramMonitor() {
             scaleHandleScreen,
             rotateHandleScreen,
             gizmoRadius,
-            closed: activeMask.closed,
+            closed: mask.closed,
           };
+
+          overlays.push(overlay);
+          if (isActive) {
+            maskOverlayRef.current = overlay;
+          }
+        });
+
+        maskOverlaysRef.current = overlays;
+        if (!maskOverlayRef.current) {
+          maskOverlayRef.current = overlays[0] ?? null;
         }
       }
     }
@@ -1634,19 +1760,27 @@ export function ProgramMonitor() {
         } else if (maskDrag.mode === 'point-in-handle') {
           nextPoints = maskDrag.basePoints.map((pt, idx) => {
             if (idx !== maskDrag.pointIndex) return pt;
+            const mirroredOutX = pt.x + (pt.x - mapped.x);
+            const mirroredOutY = pt.y + (pt.y - mapped.y);
             return {
               ...pt,
               inX: mapped.x,
               inY: mapped.y,
+              outX: e.altKey ? pt.outX : mirroredOutX,
+              outY: e.altKey ? pt.outY : mirroredOutY,
             };
           });
         } else if (maskDrag.mode === 'point-out-handle') {
           nextPoints = maskDrag.basePoints.map((pt, idx) => {
             if (idx !== maskDrag.pointIndex) return pt;
+            const mirroredInX = pt.x + (pt.x - mapped.x);
+            const mirroredInY = pt.y + (pt.y - mapped.y);
             return {
               ...pt,
               outX: mapped.x,
               outY: mapped.y,
+              inX: e.altKey ? pt.inX : mirroredInX,
+              inY: e.altKey ? pt.inY : mirroredInY,
             };
           });
         } else if (maskDrag.mode === 'shape') {
@@ -1973,282 +2107,305 @@ export function ProgramMonitor() {
       setActivePanel('program-monitor');
 
       if (maskEditMode) {
-        const overlay = maskOverlayRef.current;
         const canvas = canvasRef.current;
-        if (overlay && canvas) {
+        const overlays = [...maskOverlaysRef.current].sort((a, b) => Number(b.isActive) - Number(a.isActive));
+        if (canvas && overlays.length > 0) {
           const p = clientToCanvasPoint(canvas, e.clientX, e.clientY);
-          const mapped = mapCanvasToMaskPoint(
-            p.x,
-            p.y,
-            overlay.geometry,
-            overlay.normalized,
-          );
-          const exactMask = controlledLayer?.clip.masks?.find((m) => m.id === overlay.maskId) ?? null;
-          const existingKeyframeId =
-            exactMask?.keyframes.find((kf) => kf.frame === overlay.frame)?.id ?? null;
-          const keyframeId =
-            existingKeyframeId ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-          const basePoints = overlay.points.map((pt) => ({ ...pt }));
-          const handleThreshold = 10;
-          let handleHit:
-            | {
-                mode: 'point-in-handle' | 'point-out-handle';
-                pointIndex: number;
-                startMaskX: number;
-                startMaskY: number;
+          for (const overlay of overlays) {
+            const mapped = mapCanvasToMaskPoint(
+              p.x,
+              p.y,
+              overlay.geometry,
+              overlay.normalized,
+            );
+            const exactMask = controlledLayer?.clip.masks?.find((m) => m.id === overlay.maskId) ?? null;
+            const existingKeyframeId =
+              exactMask?.keyframes.find((kf) => kf.frame === overlay.frame)?.id ?? null;
+            const keyframeId =
+              existingKeyframeId ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+            const basePoints = overlay.points.map((pt) => ({ ...pt }));
+
+            if (overlay.isActive) {
+              const handleThreshold = 10;
+              let handleHit:
+                | {
+                    mode: 'point-in-handle' | 'point-out-handle';
+                    pointIndex: number;
+                    startMaskX: number;
+                    startMaskY: number;
+                  }
+                | null = null;
+              let handleDist = Number.POSITIVE_INFINITY;
+              for (let i = 0; i < overlay.screenPoints.length; i++) {
+                const point = overlay.points[i];
+                if (!point || isCornerMaskPoint(point)) continue;
+                const inSp = overlay.screenIn[i];
+                const outSp = overlay.screenOut[i];
+                const inD = Math.hypot(inSp.x - p.x, inSp.y - p.y);
+                if (inD <= handleThreshold && inD < handleDist) {
+                  handleDist = inD;
+                  handleHit = {
+                    mode: 'point-in-handle',
+                    pointIndex: i,
+                    startMaskX: overlay.points[i]?.inX ?? 0,
+                    startMaskY: overlay.points[i]?.inY ?? 0,
+                  };
+                }
+                const outD = Math.hypot(outSp.x - p.x, outSp.y - p.y);
+                if (outD <= handleThreshold && outD < handleDist) {
+                  handleDist = outD;
+                  handleHit = {
+                    mode: 'point-out-handle',
+                    pointIndex: i,
+                    startMaskX: overlay.points[i]?.outX ?? 0,
+                    startMaskY: overlay.points[i]?.outY ?? 0,
+                  };
+                }
               }
-            | null = null;
-          let handleDist = Number.POSITIVE_INFINITY;
-          for (let i = 0; i < overlay.screenPoints.length; i++) {
-            const inSp = overlay.screenIn[i];
-            const outSp = overlay.screenOut[i];
-            const inD = Math.hypot(inSp.x - p.x, inSp.y - p.y);
-            if (inD <= handleThreshold && inD < handleDist) {
-              handleDist = inD;
-              handleHit = {
-                mode: 'point-in-handle',
-                pointIndex: i,
-                startMaskX: overlay.points[i]?.inX ?? 0,
-                startMaskY: overlay.points[i]?.inY ?? 0,
-              };
-            }
-            const outD = Math.hypot(outSp.x - p.x, outSp.y - p.y);
-            if (outD <= handleThreshold && outD < handleDist) {
-              handleDist = outD;
-              handleHit = {
-                mode: 'point-out-handle',
-                pointIndex: i,
-                startMaskX: overlay.points[i]?.outX ?? 0,
-                startMaskY: overlay.points[i]?.outY ?? 0,
-              };
-            }
-          }
-          if (handleHit) {
-            maskDragRef.current = {
-              mode: handleHit.mode,
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              keyframeId,
-              frame: overlay.frame,
-              pointIndex: handleHit.pointIndex,
-              startMaskX: handleHit.startMaskX,
-              startMaskY: handleHit.startMaskY,
-              centerMaskX: overlay.centerMask.x,
-              centerMaskY: overlay.centerMask.y,
-              centerScreenX: overlay.centerScreen.x,
-              centerScreenY: overlay.centerScreen.y,
-              startScreenDistance: Math.max(
-                1,
-                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
-              ),
-              startScreenAngle: Math.atan2(
-                p.y - overlay.centerScreen.y,
-                p.x - overlay.centerScreen.x,
-              ),
-              basePoints: basePoints.map((pt) => ({ ...pt })),
-              points: basePoints.map((pt) => ({ ...pt })),
-              normalized: overlay.normalized,
-              geometry: overlay.geometry,
-            };
-            setSelectedMaskPoint({
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              pointIndex: handleHit.pointIndex,
-            });
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
+              if (handleHit) {
+                maskDragRef.current = {
+                  mode: handleHit.mode,
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  keyframeId,
+                  frame: overlay.frame,
+                  pointIndex: handleHit.pointIndex,
+                  startMaskX: handleHit.startMaskX,
+                  startMaskY: handleHit.startMaskY,
+                  centerMaskX: overlay.centerMask.x,
+                  centerMaskY: overlay.centerMask.y,
+                  centerScreenX: overlay.centerScreen.x,
+                  centerScreenY: overlay.centerScreen.y,
+                  startScreenDistance: Math.max(
+                    1,
+                    Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+                  ),
+                  startScreenAngle: Math.atan2(
+                    p.y - overlay.centerScreen.y,
+                    p.x - overlay.centerScreen.x,
+                  ),
+                  basePoints: cloneMaskPoints(basePoints),
+                  points: cloneMaskPoints(basePoints),
+                  normalized: overlay.normalized,
+                  geometry: overlay.geometry,
+                };
+                setSelectedMaskPoint({
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  pointIndex: handleHit.pointIndex,
+                });
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
 
-          const scaleHandleDistance = Math.hypot(
-            overlay.scaleHandleScreen.x - p.x,
-            overlay.scaleHandleScreen.y - p.y,
-          );
-          if (scaleHandleDistance <= 10) {
-            maskDragRef.current = {
-              mode: 'shape-scale',
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              keyframeId,
-              frame: overlay.frame,
-              pointIndex: -1,
-              startMaskX: mapped.x,
-              startMaskY: mapped.y,
-              centerMaskX: overlay.centerMask.x,
-              centerMaskY: overlay.centerMask.y,
-              centerScreenX: overlay.centerScreen.x,
-              centerScreenY: overlay.centerScreen.y,
-              startScreenDistance: Math.max(
-                1,
-                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
-              ),
-              startScreenAngle: Math.atan2(
-                p.y - overlay.centerScreen.y,
-                p.x - overlay.centerScreen.x,
-              ),
-              basePoints: basePoints.map((pt) => ({ ...pt })),
-              points: basePoints.map((pt) => ({ ...pt })),
-              normalized: overlay.normalized,
-              geometry: overlay.geometry,
-            };
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
+              const scaleHandleDistance = Math.hypot(
+                overlay.scaleHandleScreen.x - p.x,
+                overlay.scaleHandleScreen.y - p.y,
+              );
+              if (scaleHandleDistance <= 10) {
+                maskDragRef.current = {
+                  mode: 'shape-scale',
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  keyframeId,
+                  frame: overlay.frame,
+                  pointIndex: -1,
+                  startMaskX: mapped.x,
+                  startMaskY: mapped.y,
+                  centerMaskX: overlay.centerMask.x,
+                  centerMaskY: overlay.centerMask.y,
+                  centerScreenX: overlay.centerScreen.x,
+                  centerScreenY: overlay.centerScreen.y,
+                  startScreenDistance: Math.max(
+                    1,
+                    Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+                  ),
+                  startScreenAngle: Math.atan2(
+                    p.y - overlay.centerScreen.y,
+                    p.x - overlay.centerScreen.x,
+                  ),
+                  basePoints: cloneMaskPoints(basePoints),
+                  points: cloneMaskPoints(basePoints),
+                  normalized: overlay.normalized,
+                  geometry: overlay.geometry,
+                };
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
 
-          const rotateHandleDistance = Math.hypot(
-            overlay.rotateHandleScreen.x - p.x,
-            overlay.rotateHandleScreen.y - p.y,
-          );
-          if (rotateHandleDistance <= 10) {
-            maskDragRef.current = {
-              mode: 'shape-rotate',
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              keyframeId,
-              frame: overlay.frame,
-              pointIndex: -1,
-              startMaskX: mapped.x,
-              startMaskY: mapped.y,
-              centerMaskX: overlay.centerMask.x,
-              centerMaskY: overlay.centerMask.y,
-              centerScreenX: overlay.centerScreen.x,
-              centerScreenY: overlay.centerScreen.y,
-              startScreenDistance: Math.max(
-                1,
-                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
-              ),
-              startScreenAngle: Math.atan2(
-                p.y - overlay.centerScreen.y,
-                p.x - overlay.centerScreen.x,
-              ),
-              basePoints: basePoints.map((pt) => ({ ...pt })),
-              points: basePoints.map((pt) => ({ ...pt })),
-              normalized: overlay.normalized,
-              geometry: overlay.geometry,
-            };
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-
-          const pointThreshold = 12;
-          let hitPointIdx = -1;
-          let hitDist = Number.POSITIVE_INFINITY;
-          for (let i = 0; i < overlay.screenPoints.length; i++) {
-            const sp = overlay.screenPoints[i];
-            const d = Math.hypot(sp.x - p.x, sp.y - p.y);
-            if (d < pointThreshold && d < hitDist) {
-              hitDist = d;
-              hitPointIdx = i;
-            }
-          }
-
-          if (hitPointIdx >= 0) {
-            const hitPoint = overlay.points[hitPointIdx];
-            maskDragRef.current = {
-              mode: 'point',
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              keyframeId,
-              frame: overlay.frame,
-              pointIndex: hitPointIdx,
-              startMaskX: hitPoint?.x ?? 0,
-              startMaskY: hitPoint?.y ?? 0,
-              centerMaskX: overlay.centerMask.x,
-              centerMaskY: overlay.centerMask.y,
-              centerScreenX: overlay.centerScreen.x,
-              centerScreenY: overlay.centerScreen.y,
-              startScreenDistance: Math.max(
-                1,
-                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
-              ),
-              startScreenAngle: Math.atan2(
-                p.y - overlay.centerScreen.y,
-                p.x - overlay.centerScreen.x,
-              ),
-              basePoints: basePoints.map((pt) => ({ ...pt })),
-              points: basePoints.map((pt) => ({ ...pt })),
-              normalized: overlay.normalized,
-              geometry: overlay.geometry,
-            };
-            setSelectedMaskPoint({
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              pointIndex: hitPointIdx,
-            });
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-
-          if (e.shiftKey && overlay.points.length >= 2) {
-            let bestSegIndex = 0;
-            let bestSegDist = Number.POSITIVE_INFINITY;
-            const maxSeg = overlay.closed ? overlay.points.length : overlay.points.length - 1;
-            for (let i = 0; i < maxSeg; i++) {
-              const a = overlay.screenPoints[i];
-              const b = overlay.screenPoints[(i + 1) % overlay.screenPoints.length];
-              const d = distancePointToSegment(p.x, p.y, a.x, a.y, b.x, b.y);
-              if (d < bestSegDist) {
-                bestSegDist = d;
-                bestSegIndex = i;
+              const rotateHandleDistance = Math.hypot(
+                overlay.rotateHandleScreen.x - p.x,
+                overlay.rotateHandleScreen.y - p.y,
+              );
+              if (rotateHandleDistance <= 10) {
+                maskDragRef.current = {
+                  mode: 'shape-rotate',
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  keyframeId,
+                  frame: overlay.frame,
+                  pointIndex: -1,
+                  startMaskX: mapped.x,
+                  startMaskY: mapped.y,
+                  centerMaskX: overlay.centerMask.x,
+                  centerMaskY: overlay.centerMask.y,
+                  centerScreenX: overlay.centerScreen.x,
+                  centerScreenY: overlay.centerScreen.y,
+                  startScreenDistance: Math.max(
+                    1,
+                    Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+                  ),
+                  startScreenAngle: Math.atan2(
+                    p.y - overlay.centerScreen.y,
+                    p.x - overlay.centerScreen.x,
+                  ),
+                  basePoints: cloneMaskPoints(basePoints),
+                  points: cloneMaskPoints(basePoints),
+                  normalized: overlay.normalized,
+                  geometry: overlay.geometry,
+                };
+                e.preventDefault();
+                e.stopPropagation();
+                return;
               }
             }
 
-            const insertAt = bestSegIndex + 1;
-            void insertMaskPointAcrossKeyframes(overlay.clipId, overlay.maskId, {
-              frame: overlay.frame,
-              insertAt,
-              point: {
-                x: mapped.x,
-                y: mapped.y,
-                inX: mapped.x,
-                inY: mapped.y,
-                outX: mapped.x,
-                outY: mapped.y,
-              },
-            });
-            setSelectedMaskPoint({
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              pointIndex: insertAt,
-            });
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
+            const pointThreshold = 12;
+            let hitPointIdx = -1;
+            let hitDist = Number.POSITIVE_INFINITY;
+            for (let i = 0; i < overlay.screenPoints.length; i++) {
+              const sp = overlay.screenPoints[i];
+              const d = Math.hypot(sp.x - p.x, sp.y - p.y);
+              if (d < pointThreshold && d < hitDist) {
+                hitDist = d;
+                hitPointIdx = i;
+              }
+            }
 
-          if (overlay.closed && pointInPolygon(p.x, p.y, overlay.screenPoints)) {
-            maskDragRef.current = {
-              mode: 'shape',
-              clipId: overlay.clipId,
-              maskId: overlay.maskId,
-              keyframeId,
-              frame: overlay.frame,
-              pointIndex: -1,
-              startMaskX: mapped.x,
-              startMaskY: mapped.y,
-              centerMaskX: overlay.centerMask.x,
-              centerMaskY: overlay.centerMask.y,
-              centerScreenX: overlay.centerScreen.x,
-              centerScreenY: overlay.centerScreen.y,
-              startScreenDistance: Math.max(
-                1,
-                Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
-              ),
-              startScreenAngle: Math.atan2(
-                p.y - overlay.centerScreen.y,
-                p.x - overlay.centerScreen.x,
-              ),
-              basePoints: basePoints.map((pt) => ({ ...pt })),
-              points: basePoints.map((pt) => ({ ...pt })),
-              normalized: overlay.normalized,
-              geometry: overlay.geometry,
-            };
-            e.preventDefault();
-            e.stopPropagation();
-            return;
+            if (hitPointIdx >= 0) {
+              setActiveMaskSelection(overlay.clipId, overlay.maskId);
+              if (e.ctrlKey) {
+                if (overlay.points.length <= 2) return;
+                const nextIndex = Math.max(0, Math.min(hitPointIdx, overlay.points.length - 2));
+                void removeMaskPointAcrossKeyframes(overlay.clipId, overlay.maskId, hitPointIdx);
+                setSelectedMaskPoint({
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  pointIndex: nextIndex,
+                });
+              } else {
+                const hitPoint = overlay.points[hitPointIdx];
+                maskDragRef.current = {
+                  mode: 'point',
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  keyframeId,
+                  frame: overlay.frame,
+                  pointIndex: hitPointIdx,
+                  startMaskX: hitPoint?.x ?? 0,
+                  startMaskY: hitPoint?.y ?? 0,
+                  centerMaskX: overlay.centerMask.x,
+                  centerMaskY: overlay.centerMask.y,
+                  centerScreenX: overlay.centerScreen.x,
+                  centerScreenY: overlay.centerScreen.y,
+                  startScreenDistance: Math.max(
+                    1,
+                    Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+                  ),
+                  startScreenAngle: Math.atan2(
+                    p.y - overlay.centerScreen.y,
+                    p.x - overlay.centerScreen.x,
+                  ),
+                  basePoints: cloneMaskPoints(basePoints),
+                  points: cloneMaskPoints(basePoints),
+                  normalized: overlay.normalized,
+                  geometry: overlay.geometry,
+                };
+                setSelectedMaskPoint({
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  pointIndex: hitPointIdx,
+                });
+              }
+              e.preventDefault();
+              e.stopPropagation();
+              return;
+            }
+
+            if (overlay.points.length >= 2) {
+              let bestSegIndex = 0;
+              let bestSegDist = Number.POSITIVE_INFINITY;
+              const maxSeg = overlay.closed ? overlay.points.length : overlay.points.length - 1;
+              for (let i = 0; i < maxSeg; i++) {
+                const a = overlay.screenPoints[i];
+                const b = overlay.screenPoints[(i + 1) % overlay.screenPoints.length];
+                const d = distancePointToSegment(p.x, p.y, a.x, a.y, b.x, b.y);
+                if (d < bestSegDist) {
+                  bestSegDist = d;
+                  bestSegIndex = i;
+                }
+              }
+
+              if (e.ctrlKey && bestSegDist <= 10) {
+                const insertAt = bestSegIndex + 1;
+                setActiveMaskSelection(overlay.clipId, overlay.maskId);
+                void insertMaskPointAcrossKeyframes(overlay.clipId, overlay.maskId, {
+                  frame: overlay.frame,
+                  insertAt,
+                  point: {
+                    x: mapped.x,
+                    y: mapped.y,
+                    inX: mapped.x,
+                    inY: mapped.y,
+                    outX: mapped.x,
+                    outY: mapped.y,
+                  },
+                });
+                setSelectedMaskPoint({
+                  clipId: overlay.clipId,
+                  maskId: overlay.maskId,
+                  pointIndex: insertAt,
+                });
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
+            }
+
+            if (overlay.closed && pointInPolygon(p.x, p.y, overlay.screenPoints)) {
+              setActiveMaskSelection(overlay.clipId, overlay.maskId);
+              maskDragRef.current = {
+                mode: 'shape',
+                clipId: overlay.clipId,
+                maskId: overlay.maskId,
+                keyframeId,
+                frame: overlay.frame,
+                pointIndex: -1,
+                startMaskX: mapped.x,
+                startMaskY: mapped.y,
+                centerMaskX: overlay.centerMask.x,
+                centerMaskY: overlay.centerMask.y,
+                centerScreenX: overlay.centerScreen.x,
+                centerScreenY: overlay.centerScreen.y,
+                startScreenDistance: Math.max(
+                  1,
+                  Math.hypot(p.x - overlay.centerScreen.x, p.y - overlay.centerScreen.y),
+                ),
+                startScreenAngle: Math.atan2(
+                  p.y - overlay.centerScreen.y,
+                  p.x - overlay.centerScreen.x,
+                ),
+                basePoints: cloneMaskPoints(basePoints),
+                points: cloneMaskPoints(basePoints),
+                normalized: overlay.normalized,
+                geometry: overlay.geometry,
+              };
+              e.preventDefault();
+              e.stopPropagation();
+              return;
+            }
           }
         }
       }
@@ -2307,6 +2464,61 @@ export function ProgramMonitor() {
     ],
   );
 
+  const handleCanvasDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!maskEditMode || isPlaying || !controlledLayer) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const overlays = [...maskOverlaysRef.current].sort((a, b) => Number(b.isActive) - Number(a.isActive));
+      if (overlays.length === 0) return;
+
+      const p = clientToCanvasPoint(canvas, e.clientX, e.clientY);
+      for (const overlay of overlays) {
+        let hitPointIdx = -1;
+        let hitDist = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < overlay.screenPoints.length; i++) {
+          const sp = overlay.screenPoints[i];
+          const d = Math.hypot(sp.x - p.x, sp.y - p.y);
+          if (d <= 12 && d < hitDist) {
+            hitDist = d;
+            hitPointIdx = i;
+          }
+        }
+        if (hitPointIdx < 0) continue;
+
+        const exactMask = controlledLayer.clip.masks?.find((mask) => mask.id === overlay.maskId) ?? null;
+        const existingKeyframeId =
+          exactMask?.keyframes.find((kf) => kf.frame === overlay.frame)?.id ?? null;
+        const keyframeId =
+          existingKeyframeId ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+        const nextPoints = toggleMaskPointCurve(overlay.points, hitPointIdx, overlay.closed);
+
+        maskPreviewRef.current = {
+          clipId: overlay.clipId,
+          maskId: overlay.maskId,
+          frame: overlay.frame,
+          points: cloneMaskPoints(nextPoints),
+        };
+        void upsertMaskShapeKeyframe(overlay.clipId, overlay.maskId, {
+          id: keyframeId,
+          frame: overlay.frame,
+          points: cloneMaskPoints(nextPoints),
+        });
+        setActiveMaskSelection(overlay.clipId, overlay.maskId);
+        setSelectedMaskPoint({
+          clipId: overlay.clipId,
+          maskId: overlay.maskId,
+          pointIndex: hitPointIdx,
+        });
+        setRenderTick((v) => v + 1);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    },
+    [maskEditMode, isPlaying, controlledLayer, upsertMaskShapeKeyframe],
+  );
+
   const addMaskToControlledClip = useCallback(() => {
     if (!controlledLayer) return;
     const geometry = getLayerGeometry(controlledLayer);
@@ -2333,7 +2545,7 @@ export function ProgramMonitor() {
       ],
     });
     setMaskEditMode(true);
-    setActiveMaskId(maskId);
+    setActiveMaskSelection(controlledLayer.clip.id, maskId);
     setSelectedMaskPoint({
       clipId: controlledLayer.clip.id,
       maskId,
@@ -2374,6 +2586,7 @@ export function ProgramMonitor() {
           ref={canvasRef}
           className="absolute inset-0 h-full w-full"
           onMouseDown={startTransformDrag}
+          onDoubleClick={handleCanvasDoubleClick}
         />
 
         <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-2 text-[10px]">
@@ -2591,7 +2804,7 @@ export function ProgramMonitor() {
           />
           <span className="text-[10px] text-zinc-500">
             {maskEditMode
-              ? 'Mask mode: drag points or Bezier handles, drag inside closed mask to move shape, drag cyan square/orange circle for scale/rotate, Shift+Click edge to add, Delete to remove, [ / ] jumps prev/next mask keyframe, Onion shows prev/next'
+              ? 'Mask mode: drag points, Ctrl+Click edge to add, Ctrl+Click/Delete removes point, double-click point toggles curved/straight, Alt+drag handle breaks symmetry, drag inside to move shape, [ / ] jumps mask keyframes'
               : 'Drag clip in viewer to move, corner to resize'}
           </span>
         </div>

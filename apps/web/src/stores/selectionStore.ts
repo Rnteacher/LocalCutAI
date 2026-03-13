@@ -10,10 +10,13 @@ interface SelectionState {
   rendererMode: 'auto' | 'canvas2d' | 'webgl2';
   selectedClipIds: Set<string>;
   selectedClipId: string | null;
+  activeMaskClipId: string | null;
+  activeMaskId: string | null;
   selectedTrackId: string | null;
   timelineTool: 'select' | 'razor';
   rippleMode: boolean;
   linkedSelection: boolean;
+  linkedScale: boolean;
   autoKeyframeEnabled: boolean;
   activePanel:
     | 'project-browser'
@@ -37,12 +40,14 @@ interface SelectionState {
   selectClip: (clipId: string, addToSelection?: boolean) => void;
   deselectClip: (clipId: string) => void;
   clearClipSelection: () => void;
+  setActiveMaskSelection: (clipId: string | null, maskId: string | null) => void;
   setRendererMode: (mode: SelectionState['rendererMode']) => void;
   selectTrack: (trackId: string | null) => void;
   setActivePanel: (panel: SelectionState['activePanel']) => void;
   setTimelineTool: (tool: SelectionState['timelineTool']) => void;
   setRippleMode: (enabled: boolean) => void;
   setLinkedSelection: (enabled: boolean) => void;
+  setLinkedScale: (enabled: boolean) => void;
   setAutoKeyframeEnabled: (enabled: boolean) => void;
   setSourceAsset: (asset: ApiMediaAsset | null) => void;
   setSourceInTime: (time: number | null) => void;
@@ -57,10 +62,13 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
   rendererMode: 'auto',
   selectedClipIds: new Set<string>(),
   selectedClipId: null,
+  activeMaskClipId: null,
+  activeMaskId: null,
   selectedTrackId: null,
   timelineTool: 'select',
   rippleMode: false,
   linkedSelection: true,
+  linkedScale: true,
   autoKeyframeEnabled: false,
   activePanel: null,
   sourceAsset: null,
@@ -80,9 +88,23 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
         next.add(clipId);
       }
       const selectedClipId = next.size === 1 ? Array.from(next)[0] : null;
-      set({ selectedClipIds: next, selectedClipId });
+      set((state) => ({
+        selectedClipIds: next,
+        selectedClipId,
+        activeMaskClipId:
+          selectedClipId == null || state.activeMaskClipId === selectedClipId
+            ? state.activeMaskClipId
+            : null,
+        activeMaskId:
+          selectedClipId == null || state.activeMaskClipId === selectedClipId ? state.activeMaskId : null,
+      }));
     } else {
-      set({ selectedClipIds: new Set([clipId]), selectedClipId: clipId });
+      set((state) => ({
+        selectedClipIds: new Set([clipId]),
+        selectedClipId: clipId,
+        activeMaskClipId: state.activeMaskClipId === clipId ? state.activeMaskClipId : null,
+        activeMaskId: state.activeMaskClipId === clipId ? state.activeMaskId : null,
+      }));
     }
   },
 
@@ -91,10 +113,31 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
     const next = new Set(selectedClipIds);
     next.delete(clipId);
     const selectedClipId = next.size === 1 ? Array.from(next)[0] : null;
-    set({ selectedClipIds: next, selectedClipId });
+    set((state) => ({
+      selectedClipIds: next,
+      selectedClipId,
+      activeMaskClipId:
+        selectedClipId == null || state.activeMaskClipId === selectedClipId ? state.activeMaskClipId : null,
+      activeMaskId:
+        selectedClipId == null || state.activeMaskClipId === selectedClipId ? state.activeMaskId : null,
+    }));
   },
 
-  clearClipSelection: () => set({ selectedClipIds: new Set(), selectedClipId: null }),
+  clearClipSelection: () =>
+    set({
+      selectedClipIds: new Set(),
+      selectedClipId: null,
+      activeMaskClipId: null,
+      activeMaskId: null,
+    }),
+
+  setActiveMaskSelection: (clipId, maskId) =>
+    set((state) => {
+      if (state.activeMaskClipId === clipId && state.activeMaskId === maskId) {
+        return state;
+      }
+      return { activeMaskClipId: clipId, activeMaskId: maskId };
+    }),
 
   setRendererMode: (mode) => set({ rendererMode: mode }),
 
@@ -107,6 +150,8 @@ export const useSelectionStore = create<SelectionState>((set, get) => ({
   setRippleMode: (enabled) => set({ rippleMode: enabled }),
 
   setLinkedSelection: (enabled) => set({ linkedSelection: enabled }),
+
+  setLinkedScale: (enabled) => set({ linkedScale: enabled }),
 
   setAutoKeyframeEnabled: (enabled) => set({ autoKeyframeEnabled: enabled }),
 

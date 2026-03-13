@@ -165,6 +165,8 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
     mediaAssets,
     closeProject,
     deleteMedia,
+    dedupeMedia,
+    pickMedia,
     uploadMedia,
     importMedia,
     isLoading,
@@ -178,6 +180,7 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'video' | 'audio' | 'image'>('all');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
+  const [dedupeStatus, setDedupeStatus] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<null | {
     type: 'media';
     id: string;
@@ -186,26 +189,13 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
     warning?: string;
     actionLabel: string;
   }>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const mediaClipboardRef = useRef<string[]>([]);
 
-  /** Open native file picker */
-  const handleImport = () => {
-    fileInputRef.current?.click();
-  };
-
-  /** Handle files selected via file picker */
-  const handleFileSelected = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = e.target.files;
-      if (files && files.length > 0) {
-        uploadMedia(files);
-      }
-      // Reset input so the same file(s) can be selected again
-      e.target.value = '';
-    },
-    [uploadMedia],
-  );
+  /** Open native file picker and link media from original file paths. */
+  const handleImport = useCallback(async () => {
+    setDedupeStatus(null);
+    await pickMedia();
+  }, [pickMedia]);
 
   /** Handle files dropped from OS file explorer */
   const handleDrop = useCallback(
@@ -213,6 +203,7 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
       e.preventDefault();
       e.stopPropagation();
       setIsDragOver(false);
+      setDedupeStatus(null);
 
       // Only process native file drops, not internal asset drags
       if (e.dataTransfer.files.length > 0) {
@@ -373,7 +364,7 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
     const onOpenImport = () => handleImport();
     window.addEventListener('localcut:open-media-import', onOpenImport);
     return () => window.removeEventListener('localcut:open-media-import', onOpenImport);
-  }, []);
+  }, [handleImport]);
 
   if (!currentProject) return null;
 
@@ -388,16 +379,6 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
     >
-      {/* Hidden file input for native file picker */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        accept="video/*,audio/*,image/*"
-        className="hidden"
-        onChange={handleFileSelected}
-      />
-
       <div className="flex items-center justify-between border-b border-zinc-700 px-3 py-2">
         <div className="min-w-0">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
@@ -421,16 +402,39 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
             Back
           </button>
           <button
+            className="lc-btn px-2 py-1 text-[11px] disabled:opacity-50"
+            onClick={async () => {
+              setDedupeStatus(null);
+              const result = await dedupeMedia();
+              if (!result) return;
+              setDedupeStatus(
+                result.dedupedAssets > 0
+                  ? `Removed ${result.dedupedAssets} duplicates`
+                  : 'No duplicate assets found',
+              );
+            }}
+            disabled={isLoading}
+            title="Remove duplicate media assets and relink timeline references"
+          >
+            Clean
+          </button>
+          <button
             className="lc-btn lc-btn-primary px-2 py-1 text-[11px] disabled:opacity-50"
             onClick={handleImport}
             disabled={isLoading}
+            title="Link media from its original location without copying it into the project"
           >
-            {isLoading ? 'Importing…' : '+ Import'}
+            {isLoading ? 'Linking…' : '+ Link'}
           </button>
         </div>
       </div>
 
       <div className="space-y-1 border-b border-zinc-700 bg-zinc-900/50 p-2">
+        {dedupeStatus && (
+          <div className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-200">
+            {dedupeStatus}
+          </div>
+        )}
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
@@ -476,9 +480,9 @@ export function ProjectBrowser({ onToggleCollapse }: { onToggleCollapse?: () => 
             No media imported yet.
             <br />
             <button className="mt-2 text-blue-400 hover:text-blue-300" onClick={handleImport}>
-              Import files
+              Link files
             </button>
-            <p className="mt-1 text-[10px] text-zinc-600">or drag &amp; drop files here</p>
+            <p className="mt-1 text-[10px] text-zinc-600">or drag &amp; drop files here if native paths are available</p>
           </div>
         ) : filteredAssets.length === 0 ? (
           <div className="p-3 text-center text-xs text-zinc-500">No media matches this filter.</div>

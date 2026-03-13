@@ -230,10 +230,22 @@ function getDefaultForProperty(clip: ClipItem, property: AnimatableProperty): nu
   switch (property) {
     case 'opacity':
       return clip.opacity;
+    case 'speed':
+      return clip.speed ?? 1;
     case 'volume':
       return clip.volume;
     case 'pan':
       return clip.pan;
+    case 'brightness':
+      return clip.brightness ?? 1;
+    case 'contrast':
+      return clip.contrast ?? 1;
+    case 'saturation':
+      return clip.saturation ?? 1;
+    case 'hue':
+      return clip.hue ?? 0;
+    case 'vignette':
+      return clip.vignette ?? 0;
     case 'transform.positionX':
       return clip.transform.positionX;
     case 'transform.positionY':

@@ -4,8 +4,14 @@ export type EasingType = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'be
 
 export type AnimatableProperty =
   | 'opacity'
+  | 'speed'
   | 'volume'
   | 'pan'
+  | 'brightness'
+  | 'contrast'
+  | 'saturation'
+  | 'hue'
+  | 'vignette'
   | 'transform.positionX'
   | 'transform.positionY'
   | 'transform.scaleX'

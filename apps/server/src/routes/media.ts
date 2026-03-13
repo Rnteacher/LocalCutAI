@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { nanoid } from 'nanoid';
-import { getDb } from '../db/client.js';
-import { mediaAssets, projects } from '../db/schema.js';
+import { getDb, getSqlite } from '../db/client.js';
+import { mediaAssets, projects, sequences } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { probeFile, getMediaType } from '../util/ffprobe.js';
 import { pipeline } from 'stream/promises';
@@ -9,7 +9,18 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { config } from '../config.js';
+import {
+  collectSequenceMediaReferences,
+  chooseCanonicalMediaAsset,
+  getMediaDedupeKey,
+  mergeMediaDedupeMetadata,
+  normalizeMediaPath,
+  parseMediaMetadata,
+  remapSequenceMediaReferences,
+  serializeMediaMetadata,
+} from '../util/mediaDedup.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,6 +83,314 @@ const mediaFileParamsSchema = {
   },
 } as const;
 
+type MediaRow = typeof mediaAssets.$inferSelect;
+type SequenceRow = typeof sequences.$inferSelect;
+type ProjectRow = typeof projects.$inferSelect;
+
+interface MediaFingerprintInfo {
+  normalizedPath: string;
+  contentHash: string | null;
+  dedupeKey: string;
+  metadataRaw: string;
+}
+
+type MediaSourceKind = 'import' | 'upload' | 'unknown';
+
+async function hashFile(filePath: string): Promise<string | null> {
+  if (!fs.existsSync(filePath)) return null;
+  return await new Promise<string>((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function isManagedProjectPath(projectDir: string, candidatePath: string | null | undefined): boolean {
+  if (!candidatePath) return false;
+  const mediaDir = normalizeMediaPath(path.join(projectDir, 'media'));
+  const target = normalizeMediaPath(candidatePath);
+  return target === mediaDir || target.startsWith(`${mediaDir}${path.sep}`);
+}
+
+function inferMediaSourceKind(
+  row: Pick<MediaRow, 'filePath' | 'metadata'>,
+  projectDir: string,
+): MediaSourceKind {
+  const currentKind = parseMediaMetadata(row.metadata).dedupe?.sourceKind;
+  if (currentKind) return currentKind;
+  return isManagedProjectPath(projectDir, row.filePath) ? 'upload' : 'import';
+}
+
+function buildMediaFingerprintInfo(
+  row: Pick<MediaRow, 'filePath' | 'metadata'>,
+  sourceKind: 'import' | 'upload' | 'unknown',
+  contentHash: string | null,
+): MediaFingerprintInfo {
+  const normalizedPath = normalizeMediaPath(row.filePath);
+  const merged = mergeMediaDedupeMetadata(row.metadata, {
+    sourceKind,
+    normalizedPath,
+    contentHash: contentHash ?? undefined,
+  });
+  const metadataRaw = merged.changed ? serializeMediaMetadata(merged.metadata) : row.metadata || '{}';
+  return {
+    normalizedPath,
+    contentHash,
+    dedupeKey: getMediaDedupeKey({ filePath: row.filePath, metadata: metadataRaw })!,
+    metadataRaw,
+  };
+}
+
+async function resolveFingerprintForRow(
+  row: MediaRow,
+  sourceKind: MediaSourceKind,
+  options?: { computeHash?: boolean },
+): Promise<MediaFingerprintInfo> {
+  const currentMetadata = parseMediaMetadata(row.metadata);
+  let contentHash = currentMetadata.dedupe?.contentHash ?? null;
+  if (!contentHash && options?.computeHash) {
+    contentHash = await hashFile(row.filePath);
+  }
+  return buildMediaFingerprintInfo(row, sourceKind, contentHash);
+}
+
+async function persistMediaFingerprintInfo(
+  db: ReturnType<typeof getDb>,
+  row: MediaRow,
+  info: MediaFingerprintInfo,
+) {
+  if ((row.metadata || '{}') === info.metadataRaw) return;
+  db.update(mediaAssets)
+    .set({ metadata: info.metadataRaw })
+    .where(eq(mediaAssets.id, row.id))
+    .run();
+  row.metadata = info.metadataRaw;
+}
+
+async function ensureCandidateHashes(
+  db: ReturnType<typeof getDb>,
+  candidates: MediaRow[],
+  projectDir: string,
+  hashIndex: Map<string, MediaRow>,
+) {
+  for (const candidate of candidates) {
+    const current = parseMediaMetadata(candidate.metadata);
+    if (current.dedupe?.contentHash) {
+      hashIndex.set(current.dedupe.contentHash, candidate);
+      continue;
+    }
+    const info = await resolveFingerprintForRow(candidate, inferMediaSourceKind(candidate, projectDir), {
+      computeHash: true,
+    });
+    if (info.contentHash) {
+      hashIndex.set(info.contentHash, candidate);
+    }
+    await persistMediaFingerprintInfo(db, candidate, info);
+  }
+}
+
+async function cleanupManagedMediaFiles(
+  projectDir: string,
+  duplicateRows: MediaRow[],
+  retainedPaths: Set<string>,
+) {
+  let removedFiles = 0;
+  const cleanupTargets = duplicateRows.flatMap((row) => [
+    row.filePath,
+    row.thumbnailPath,
+    row.waveformDataPath,
+    row.proxyPath,
+  ]);
+
+  for (const candidatePath of cleanupTargets) {
+    if (!candidatePath) continue;
+    const normalized = normalizeMediaPath(candidatePath);
+    if (retainedPaths.has(normalized)) continue;
+    if (!isManagedProjectPath(projectDir, candidatePath)) continue;
+    if (!fs.existsSync(candidatePath)) continue;
+    try {
+      fs.unlinkSync(candidatePath);
+      removedFiles += 1;
+    } catch {
+      // Ignore cleanup failures. The DB is already canonicalized.
+    }
+  }
+  return removedFiles;
+}
+
+async function importMediaPathsForProject(
+  db: ReturnType<typeof getDb>,
+  project: ProjectRow,
+  filePaths: string[],
+) {
+  const projectRows = db.select().from(mediaAssets).where(eq(mediaAssets.projectId, project.id)).all();
+  const { pathIndex, hashIndex, missingHashBySize } = buildProjectMediaIndexes(projectRows);
+
+  const imported: unknown[] = [];
+  const errors: { path: string; error: string }[] = [];
+
+  for (const filePath of filePaths) {
+    try {
+      if (!fs.existsSync(filePath)) {
+        errors.push({ path: filePath, error: 'File not found' });
+        continue;
+      }
+
+      const stat = fs.statSync(filePath);
+      const normalizedPath = normalizeMediaPath(filePath);
+      const existingByPath = pathIndex.get(normalizedPath);
+      if (existingByPath) {
+        imported.push(mapMediaRow(existingByPath));
+        continue;
+      }
+
+      const incomingHash = await hashFile(filePath);
+      if (incomingHash) {
+        const existingByHash = hashIndex.get(incomingHash);
+        if (existingByHash) {
+          imported.push(mapMediaRow(existingByHash));
+          continue;
+        }
+
+        const sizeCandidates = missingHashBySize.get(stat.size) ?? [];
+        await ensureCandidateHashes(db, sizeCandidates, project.projectDir, hashIndex);
+        missingHashBySize.delete(stat.size);
+        const recheckedByHash = hashIndex.get(incomingHash);
+        if (recheckedByHash) {
+          imported.push(mapMediaRow(recheckedByHash));
+          continue;
+        }
+      }
+
+      const type = getMediaType(filePath);
+      const probe = await probeFile(filePath);
+      const id = nanoid(12);
+      const now = new Date().toISOString();
+      const fingerprint = buildMediaFingerprintInfo(
+        { filePath, metadata: '{}' },
+        'import',
+        incomingHash,
+      );
+
+      db.insert(mediaAssets)
+        .values({
+          id,
+          projectId: project.id,
+          name: path.basename(filePath),
+          type,
+          filePath,
+          mimeType: probe.mimeType,
+          fileSize: stat.size,
+          duration: probe.duration,
+          frameRateNum: probe.frameRateNum,
+          frameRateDen: probe.frameRateDen,
+          width: probe.width,
+          height: probe.height,
+          audioChannels: probe.audioChannels,
+          audioSampleRate: probe.audioSampleRate,
+          codec: probe.codec,
+          importedAt: now,
+          metadata: fingerprint.metadataRaw,
+        })
+        .run();
+
+      const row = db.select().from(mediaAssets).where(eq(mediaAssets.id, id)).get();
+      imported.push(mapMediaRow(row!));
+      if (row) {
+        projectRows.push(row);
+        pathIndex.set(fingerprint.normalizedPath, row);
+        if (fingerprint.contentHash) {
+          hashIndex.set(fingerprint.contentHash, row);
+        }
+      }
+    } catch (err) {
+      errors.push({
+        path: filePath,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      });
+    }
+  }
+
+  return { imported, errors };
+}
+
+async function openWindowsMediaPicker(): Promise<string[]> {
+  if (process.platform !== 'win32') {
+    throw new Error('Native media picker is currently available on Windows only');
+  }
+
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Multiselect = $true
+$dialog.Title = 'Link Media'
+$dialog.Filter = 'Media Files|*.mp4;*.mov;*.mkv;*.webm;*.avi;*.mxf;*.mp3;*.wav;*.aac;*.m4a;*.flac;*.ogg;*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff;*.gif;*.webp|All Files|*.*'
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  $dialog.FileNames | ConvertTo-Json -Compress
+} else {
+  '[]'
+}
+`.trim();
+
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const { stdout } = await execFileAsync(
+    'powershell.exe',
+    ['-NoProfile', '-STA', '-EncodedCommand', encoded],
+    { windowsHide: false, maxBuffer: 1024 * 1024 },
+  );
+  const raw = `${stdout}`.trim();
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  if (Array.isArray(parsed)) {
+    return parsed.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  }
+  return typeof parsed === 'string' && parsed.trim().length > 0 ? [parsed] : [];
+}
+
+function buildProjectMediaIndexes(rows: MediaRow[]) {
+  const pathIndex = new Map<string, MediaRow>();
+  const hashIndex = new Map<string, MediaRow>();
+  const missingHashBySize = new Map<number, MediaRow[]>();
+
+  for (const row of rows) {
+    const metadata = parseMediaMetadata(row.metadata);
+    const normalizedPath = metadata.dedupe?.normalizedPath ?? normalizeMediaPath(row.filePath);
+    pathIndex.set(normalizedPath, row);
+
+    const contentHash = metadata.dedupe?.contentHash;
+    if (contentHash) {
+      hashIndex.set(contentHash, row);
+      continue;
+    }
+
+    const bucketKey = row.fileSize ?? 0;
+    const bucket = missingHashBySize.get(bucketKey) ?? [];
+    bucket.push(row);
+    missingHashBySize.set(bucketKey, bucket);
+  }
+
+  return { pathIndex, hashIndex, missingHashBySize };
+}
+
+function collectRetainedPaths(rows: MediaRow[]): Set<string> {
+  const retainedPaths = new Set<string>();
+  for (const row of rows) {
+    for (const candidatePath of [row.filePath, row.thumbnailPath, row.waveformDataPath, row.proxyPath]) {
+      if (!candidatePath) continue;
+      retainedPaths.add(normalizeMediaPath(candidatePath));
+    }
+  }
+  return retainedPaths;
+}
+
+function mergeReferenceCounts(target: Record<string, number>, source: Record<string, number>) {
+  for (const [assetId, count] of Object.entries(source)) {
+    target[assetId] = (target[assetId] ?? 0) + count;
+  }
+}
+
 export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
   // POST /projects/:id/media/import - Import media by file path(s)
   fastify.post<{
@@ -96,56 +415,36 @@ export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
       if (!filePaths || !Array.isArray(filePaths) || filePaths.length === 0) {
         return reply.code(400).send({ success: false, error: 'filePaths array is required' });
       }
+      const { imported, errors } = await importMediaPathsForProject(db, project, filePaths);
 
-      const imported: unknown[] = [];
-      const errors: { path: string; error: string }[] = [];
+      return {
+        success: true,
+        data: { imported, errors },
+      };
+    },
+  );
 
-      for (const filePath of filePaths) {
-        try {
-          // Verify file exists
-          if (!fs.existsSync(filePath)) {
-            errors.push({ path: filePath, error: 'File not found' });
-            continue;
-          }
-
-          const stat = fs.statSync(filePath);
-          const type = getMediaType(filePath);
-          const probe = await probeFile(filePath);
-          const id = nanoid(12);
-          const now = new Date().toISOString();
-
-          db.insert(mediaAssets)
-            .values({
-              id,
-              projectId: request.params.id,
-              name: path.basename(filePath),
-              type,
-              filePath,
-              mimeType: probe.mimeType,
-              fileSize: stat.size,
-              duration: probe.duration,
-              frameRateNum: probe.frameRateNum,
-              frameRateDen: probe.frameRateDen,
-              width: probe.width,
-              height: probe.height,
-              audioChannels: probe.audioChannels,
-              audioSampleRate: probe.audioSampleRate,
-              codec: probe.codec,
-              importedAt: now,
-              metadata: JSON.stringify({}),
-            })
-            .run();
-
-          const row = db.select().from(mediaAssets).where(eq(mediaAssets.id, id)).get();
-          imported.push(mapMediaRow(row!));
-        } catch (err) {
-          errors.push({
-            path: filePath,
-            error: err instanceof Error ? err.message : 'Unknown error',
-          });
-        }
+  // POST /projects/:id/media/pick - Open native file picker and link media without copying
+  fastify.post<{ Params: { id: string } }>(
+    '/projects/:id/media/pick',
+    {
+      schema: {
+        params: projectIdParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const db = getDb();
+      const project = db.select().from(projects).where(eq(projects.id, request.params.id)).get();
+      if (!project) {
+        return reply.code(404).send({ success: false, error: 'Project not found' });
       }
 
+      const filePaths = await openWindowsMediaPicker();
+      if (filePaths.length === 0) {
+        return { success: true, data: { imported: [], errors: [] } };
+      }
+
+      const { imported, errors } = await importMediaPathsForProject(db, project, filePaths);
       return {
         success: true,
         data: { imported, errors },
@@ -173,6 +472,9 @@ export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
       if (!fs.existsSync(mediaDir)) {
         fs.mkdirSync(mediaDir, { recursive: true });
       }
+
+      const projectRows = db.select().from(mediaAssets).where(eq(mediaAssets.projectId, request.params.id)).all();
+      const { hashIndex, missingHashBySize } = buildProjectMediaIndexes(projectRows);
 
       const imported: unknown[] = [];
       const errors: { name: string; error: string }[] = [];
@@ -203,10 +505,35 @@ export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
           }
 
           const stat = fs.statSync(destPath);
+          const contentHash = await hashFile(destPath);
+          if (contentHash) {
+            const existingByHash = hashIndex.get(contentHash);
+            if (existingByHash) {
+              fs.unlinkSync(destPath);
+              imported.push(mapMediaRow(existingByHash));
+              continue;
+            }
+
+            const sizeCandidates = (missingHashBySize.get(stat.size) ?? []).filter((row) => row.filePath !== destPath);
+            await ensureCandidateHashes(db, sizeCandidates, project.projectDir, hashIndex);
+            missingHashBySize.delete(stat.size);
+            const recheckedByHash = hashIndex.get(contentHash);
+            if (recheckedByHash) {
+              fs.unlinkSync(destPath);
+              imported.push(mapMediaRow(recheckedByHash));
+              continue;
+            }
+          }
+
           const type = getMediaType(destPath);
           const probe = await probeFile(destPath);
           const id = nanoid(12);
           const now = new Date().toISOString();
+          const fingerprint = buildMediaFingerprintInfo(
+            { filePath: destPath, metadata: '{}' },
+            'upload',
+            contentHash,
+          );
 
           db.insert(mediaAssets)
             .values({
@@ -226,12 +553,18 @@ export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
               audioSampleRate: probe.audioSampleRate,
               codec: probe.codec,
               importedAt: now,
-              metadata: JSON.stringify({}),
+              metadata: fingerprint.metadataRaw,
             })
             .run();
 
           const row = db.select().from(mediaAssets).where(eq(mediaAssets.id, id)).get();
           imported.push(mapMediaRow(row!));
+          if (row) {
+            projectRows.push(row);
+            if (fingerprint.contentHash) {
+              hashIndex.set(fingerprint.contentHash, row);
+            }
+          }
         } catch (err) {
           // Clean up partial file on error
           if (fs.existsSync(destPath)) {
@@ -249,6 +582,113 @@ export const mediaRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       return { success: true, data: { imported, errors } };
+    },
+  );
+
+  // POST /projects/:id/media/dedupe - Canonicalize duplicate media assets within a project
+  fastify.post<{ Params: { id: string } }>(
+    '/projects/:id/media/dedupe',
+    {
+      schema: {
+        params: projectIdParamsSchema,
+      },
+    },
+    async (request, reply) => {
+      const db = getDb();
+      const sqlite = getSqlite();
+      const project = db.select().from(projects).where(eq(projects.id, request.params.id)).get();
+      if (!project) {
+        return reply.code(404).send({ success: false, error: 'Project not found' });
+      }
+
+      const rows = db.select().from(mediaAssets).where(eq(mediaAssets.projectId, request.params.id)).all();
+      const projectSequences = db.select().from(sequences).where(eq(sequences.projectId, request.params.id)).all();
+
+      const referenceCounts: Record<string, number> = {};
+      for (const sequence of projectSequences) {
+        try {
+          mergeReferenceCounts(referenceCounts, collectSequenceMediaReferences(JSON.parse(sequence.data || '{}')));
+        } catch {
+          // Ignore malformed sequence payloads. They cannot be remapped safely here.
+        }
+      }
+
+      const fingerprintById = new Map<string, MediaFingerprintInfo>();
+      const groups = new Map<string, MediaRow[]>();
+      for (const row of rows) {
+        const info = await resolveFingerprintForRow(
+          row,
+          inferMediaSourceKind(row, project.projectDir),
+          { computeHash: true },
+        );
+        fingerprintById.set(row.id, info);
+        const bucket = groups.get(info.dedupeKey) ?? [];
+        bucket.push(row);
+        groups.set(info.dedupeKey, bucket);
+      }
+
+      const duplicateRows: MediaRow[] = [];
+      const remap: Record<string, string> = {};
+      let canonicalAssets = 0;
+      for (const group of groups.values()) {
+        if (group.length <= 1) continue;
+        canonicalAssets += 1;
+        const canonical = chooseCanonicalMediaAsset(group, referenceCounts);
+        for (const row of group) {
+          if (row.id === canonical.id) continue;
+          duplicateRows.push(row);
+          remap[row.id] = canonical.id;
+        }
+      }
+
+      const updatedAt = new Date().toISOString();
+      const sequenceUpdates = projectSequences
+        .map((sequence) => {
+          const remapped = remapSequenceMediaReferences(sequence.data, remap);
+          if (!remapped.changed) return null;
+          return { id: sequence.id, data: remapped.data };
+        })
+        .filter((value): value is { id: string; data: string } => value != null);
+
+      const duplicateIds = new Set(duplicateRows.map((row) => row.id));
+      const retainedRows = rows.filter((row) => !duplicateIds.has(row.id));
+      const retainedPaths = collectRetainedPaths(retainedRows);
+
+      const transaction = sqlite.transaction(() => {
+        for (const row of rows) {
+          const fingerprint = fingerprintById.get(row.id);
+          if (!fingerprint || (row.metadata || '{}') === fingerprint.metadataRaw) continue;
+          db.update(mediaAssets)
+            .set({ metadata: fingerprint.metadataRaw })
+            .where(eq(mediaAssets.id, row.id))
+            .run();
+        }
+
+        for (const sequenceUpdate of sequenceUpdates) {
+          db.update(sequences)
+            .set({ data: sequenceUpdate.data, updatedAt })
+            .where(eq(sequences.id, sequenceUpdate.id))
+            .run();
+        }
+
+        for (const duplicate of duplicateRows) {
+          db.delete(mediaAssets).where(eq(mediaAssets.id, duplicate.id)).run();
+        }
+      });
+
+      transaction();
+      const removedFiles = await cleanupManagedMediaFiles(project.projectDir, duplicateRows, retainedPaths);
+
+      return {
+        success: true,
+        data: {
+          totalAssets: rows.length,
+          canonicalAssets,
+          dedupedAssets: duplicateRows.length,
+          updatedSequences: sequenceUpdates.length,
+          removedFiles,
+        },
+      };
     },
   );
 
@@ -489,6 +929,6 @@ function mapMediaRow(row: typeof mediaAssets.$inferSelect) {
     thumbnailPath: row.thumbnailPath,
     waveformDataPath: row.waveformDataPath,
     proxy: row.proxyPath ? { path: row.proxyPath, status: row.proxyStatus } : null,
-    metadata: JSON.parse(row.metadata || '{}'),
+    metadata: parseMediaMetadata(row.metadata),
   };
 }

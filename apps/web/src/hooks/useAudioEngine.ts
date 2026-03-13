@@ -5,6 +5,7 @@ import type { TimelineClipData, TimelineTrackData } from '../stores/projectStore
 import { api } from '../lib/api.js';
 import { adaptSequence } from '../lib/timelineAdapter.js';
 import { buildCompositionPlan } from '../lib/core.js';
+import { evaluateClipNumericKeyframe, resolveClipSourceTimeSec } from '../lib/clipKeyframes.js';
 import {
   buildRoutingMatrix,
   dbToGain,
@@ -35,21 +36,6 @@ interface MeterNodes {
   analyserR: AnalyserNode;
   lData: Float32Array;
   rData: Float32Array;
-}
-
-function getClipSourceTimeSec(clip: TimelineClipData, currentFrame: number, fps: number): number {
-  const sourceIn = clip.sourceInFrame ?? 0;
-  const sourceOut = clip.sourceOutFrame ?? sourceIn + Math.max(1, clip.durationFrames);
-  const speed = clip.speed ?? 1;
-  const rel = currentFrame - clip.startFrame;
-  let sourceFrame: number;
-  if (speed >= 0) {
-    sourceFrame = sourceIn + rel * speed;
-  } else {
-    sourceFrame = sourceOut - 1 + rel * speed;
-  }
-  sourceFrame = Math.max(sourceIn, Math.min(sourceOut - 1, sourceFrame));
-  return sourceFrame / Math.max(1, fps);
 }
 
 export function useAudioEngine(): void {
@@ -210,12 +196,13 @@ export function useAudioEngine(): void {
         const clipById = new Map<string, TimelineClipData>();
         const trackById = new Map<
           string,
-          { channelMode?: 'stereo' | 'mono'; channelMap?: 'L+R' | 'L' | 'R' }
+          { channelMode?: 'stereo' | 'mono'; channelMap?: 'L+R' | 'L' | 'R'; pan?: number }
         >();
         for (const track of tracks) {
           trackById.set(track.id, {
             channelMode: track.channelMode,
             channelMap: track.channelMap,
+            pan: track.pan,
           });
           for (const clip of track.clips) {
             clipById.set(clip.id, clip);
@@ -281,7 +268,12 @@ export function useAudioEngine(): void {
           if (!source) continue;
 
           const clip = clipById.get(sourcePlan.clipId);
-          const speed = clip?.speed ?? 1;
+          const clipLocalFrame = clip
+            ? Math.max(0, Math.min(clip.durationFrames, playback.currentFrame - clip.startFrame))
+            : 0;
+          const speed = clip
+            ? evaluateClipNumericKeyframe(clip, 'speed', clipLocalFrame, clip.speed ?? 1)
+            : 1;
           const speedAbs = Math.max(0.1, Math.min(4, Math.abs(speed)));
           const preservePitch = clip?.preservePitch ?? true;
           const shuttle = playback.shuttleSpeed;
@@ -289,7 +281,7 @@ export function useAudioEngine(): void {
           const canPlayForward = playback.isPlaying && shuttle > 0 && speed > 0;
 
           const sourceTimeSec = clip
-            ? getClipSourceTimeSec(clip, playback.currentFrame, fps)
+            ? resolveClipSourceTimeSec(clip, clipLocalFrame, fps)
             : (sourcePlan.sourceTime.frames * sourcePlan.sourceTime.rate.den) /
               sourcePlan.sourceTime.rate.num;
 
@@ -337,7 +329,15 @@ export function useAudioEngine(): void {
 
           const trackCfg = trackById.get(sourcePlan.trackId);
           const mode = resolveChannelMode(trackCfg?.channelMode, trackCfg?.channelMap);
-          const pan = clip?.pan ?? clip?.audioPan ?? 0;
+          const keyframedPan = clip
+            ? evaluateClipNumericKeyframe(
+                clip,
+                'pan',
+                clipLocalFrame,
+                clip.pan ?? clip.audioPan ?? 0,
+              )
+            : 0;
+          const pan = Math.max(-1, Math.min(1, keyframedPan + (trackCfg?.pan ?? 0)));
           const matrix = buildRoutingMatrix(mode, pan);
           const anySource = source as Partial<AudioSourceNode>;
           if (anySource.routeLL && anySource.routeLR && anySource.routeRL && anySource.routeRR) {
@@ -400,7 +400,16 @@ export function useAudioEngine(): void {
       }
     };
 
-    const unsubscribePlayback = usePlaybackStore.subscribe((playback) => runUpdate(playback));
+    const unsubscribePlayback = usePlaybackStore.subscribe((playback, previousPlayback) => {
+      if (
+        playback.currentFrame === previousPlayback.currentFrame &&
+        playback.isPlaying === previousPlayback.isPlaying &&
+        playback.shuttleSpeed === previousPlayback.shuttleSpeed
+      ) {
+        return;
+      }
+      runUpdate(playback);
+    });
     const unsubscribeProject = useProjectStore.subscribe(() =>
       runUpdate(usePlaybackStore.getState()),
     );

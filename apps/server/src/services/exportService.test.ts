@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
 
 // Re-export the internal helpers for testing by extracting logic
 // Since the internal functions aren't exported, we test via the module's behavior.
@@ -21,6 +22,66 @@ describe('ExportService types', () => {
     expect(typeof mod.startExport).toBe('function');
     expect(mod.cancelExport).toBeDefined();
     expect(typeof mod.cancelExport).toBe('function');
+  });
+});
+
+describe('FFmpeg spawn argument preparation', () => {
+  it('writes long filter graphs to a temp filter_complex_script file', async () => {
+    const mod = await import('./exportService.js');
+    const longGraph = '[0:v]null[v0];'.repeat(5000);
+    const prepared = mod.__test__.prepareFfmpegArgsForSpawn('job-long', [
+      '-y',
+      '-filter_complex',
+      longGraph,
+      '-map',
+      '[vout]',
+      'out.mp4',
+    ]);
+
+    const scriptFlagIndex = prepared.args.indexOf('-filter_complex_script');
+    expect(scriptFlagIndex).toBeGreaterThan(-1);
+
+    const scriptPath = prepared.args[scriptFlagIndex + 1];
+    expect(typeof scriptPath).toBe('string');
+    if (typeof scriptPath !== 'string') {
+      prepared.cleanup();
+      throw new Error('Expected filter_complex_script path');
+    }
+
+    expect(fs.existsSync(scriptPath)).toBe(true);
+    expect(fs.readFileSync(scriptPath, 'utf8')).toBe(longGraph);
+
+    prepared.cleanup();
+    expect(fs.existsSync(scriptPath)).toBe(false);
+  });
+
+  it('keeps short filter graphs inline', async () => {
+    const mod = await import('./exportService.js');
+    const prepared = mod.__test__.prepareFfmpegArgsForSpawn('job-short', [
+      '-y',
+      '-filter_complex',
+      '[0:v]null[v0]',
+      '-map',
+      '[v0]',
+      'out.mp4',
+    ]);
+
+    expect(prepared.args).toContain('-filter_complex');
+    expect(prepared.args).not.toContain('-filter_complex_script');
+    prepared.cleanup();
+  });
+});
+
+describe('FFmpeg progress parsing', () => {
+  it('parses progress timestamps from multiple ffmpeg output formats', async () => {
+    const mod = await import('./exportService.js');
+    const parse = mod.__test__.parseFfmpegProgressTime;
+
+    expect(parse('out_time_ms=1500000')).toBeCloseTo(1.5, 6);
+    expect(parse('out_time_us=2500000')).toBeCloseTo(2.5, 6);
+    expect(parse('out_time=00:00:03.250000')).toBeCloseTo(3.25, 6);
+    expect(parse('frame=10 fps=0.0 time=00:00:04.04 bitrate=N/A')).toBeCloseTo(4.04, 2);
+    expect(parse('progress=continue')).toBeNull();
   });
 });
 
@@ -193,6 +254,107 @@ describe('ExportService core-plan integration', () => {
     expect(segments.audioSegments.length).toBeGreaterThan(0);
     expect(segments.videoSegments[0].positionX).toBe(20);
     expect(segments.videoSegments[0].positionY).toBe(10);
+  });
+
+  it('extracts speed-aware source mapping for animated speed keyframes', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-speed-kf',
+      projectId: 'proj1',
+      name: 'Sequence speed keyframes',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 10,
+              sourceOutFrame: 50,
+              speed: 1,
+              keyframes: [
+                { id: 'k1', property: 'speed', frame: 0, value: 1 },
+                { id: 'k2', property: 'speed', frame: 23, value: 2 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const { videoSegments } = mod.__test__.extractSegments(sequence);
+
+    expect(videoSegments.length).toBeGreaterThan(1);
+    const first = videoSegments[0];
+    const last = videoSegments[videoSegments.length - 1];
+    expect(first.sourceStartFrame).toBeGreaterThanOrEqual(10);
+    expect(last.sourceStartFrame).toBeGreaterThan(first.sourceStartFrame);
+    expect(
+      videoSegments.some(
+        (seg: any) => Math.abs((seg.sourceEndFrame ?? 0) - (seg.sourceStartFrame ?? 0) - 1) > 0.05,
+      ),
+    ).toBe(true);
+  });
+
+  it('extracts color-keyframed segment state for export parity', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-color-kf',
+      projectId: 'proj1',
+      name: 'Sequence color keyframes',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'c1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+              brightness: 1,
+              keyframes: [
+                { id: 'k1', property: 'brightness', frame: 0, value: 1 },
+                { id: 'k2', property: 'brightness', frame: 23, value: 1.5 },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const { videoSegments } = mod.__test__.extractSegments(sequence);
+    expect(videoSegments.some((seg: any) => (seg.brightness ?? 1) > 1.1)).toBe(true);
   });
 
   it('keeps animated mask segments split across frames', async () => {
@@ -400,7 +562,7 @@ describe('ExportService core-plan integration', () => {
               id: 'c1',
               mediaAssetId: 'm1',
               type: 'video',
-              startFrame: 0,
+              startFrame: 24,
               durationFrames: 24,
               sourceInFrame: 0,
               positionX: 30,
@@ -432,6 +594,8 @@ describe('ExportService core-plan integration', () => {
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('rotate=');
     expect(filterArg).toContain("overlay=x='");
+    expect(filterArg).toContain('setpts=PTS-STARTPTS+1/TB');
+    expect(filterArg).not.toContain("enable='between(t,");
     expect(filterArg).toContain('scale=iw*1.100000:ih*0.800000');
   });
 
@@ -521,6 +685,65 @@ describe('ExportService core-plan integration', () => {
     expect(filterArg).toContain('aformat=channel_layouts=stereo');
     expect(filterArg).toContain('pan=stereo|c0=');
     expect(filterArg).toContain('(c0)');
+    expect(filterArg).toContain('anullsrc=r=48000:cl=stereo,atrim=duration=');
+    expect(filterArg).toContain('[asilence]');
+    expect(filterArg).toContain('amix=inputs=');
+    expect(filterArg).toContain("weights='0 ");
+  });
+
+  it('injects silent bed into final audio mix to avoid empty-audio exports', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-no-audio',
+      projectId: 'proj1',
+      name: 'Sequence no audio',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'vc1',
+              mediaAssetId: 'm1',
+              type: 'video',
+              startFrame: 0,
+              durationFrames: 24,
+              sourceInFrame: 0,
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+      },
+      'out.mp4',
+      new Map([['m1', 'media.mp4']]),
+      1,
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('anullsrc=r=48000:cl=stereo,atrim=duration=');
+    expect(filterArg).toContain('[asilence]');
+    expect(filterArg).toContain('amix=inputs=');
   });
 });
 
@@ -751,6 +974,8 @@ describe('ExportService new timeline model support', () => {
 
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('alphaextract');
+    expect(filterArg).toContain('format=rgba,alphaextract');
+    expect(filterArg).toContain('scale=w=rw:h=rh');
     expect(filterArg).toContain('alphamerge');
   });
 
@@ -952,7 +1177,13 @@ describe('ExportService new timeline model support', () => {
     );
     const filterArg = args[args.indexOf('-filter_complex') + 1];
     expect(filterArg).toContain('geq=lum=');
-    expect(filterArg).toContain('alphaextract');
+    expect(filterArg).toContain('trim=end_frame=1');
+    expect(filterArg).toContain('loop=loop=-1:size=1:start=0');
+    expect(filterArg).toContain('split=3[masksrc');
+    expect(filterArg).toContain('split=2[msref');
+    expect(filterArg).toContain('split=2[rsref');
+    expect(filterArg).toContain('format=rgba,alphaextract');
+    expect(filterArg).toContain('scale=w=rw:h=rh[aref');
     expect(filterArg).toContain('alphamerge');
   });
 

@@ -96,7 +96,11 @@ export function ProjectsScreen() {
       <ConfirmDialog
         open={!!deleteTarget}
         title="Delete project?"
-        message={deleteTarget ? `Delete \"${deleteTarget.name}\"? This cannot be undone.` : ''}
+        message={
+          deleteTarget
+            ? `Delete \"${deleteTarget.name}\"? This removes the project and its LocalCut project folder from disk.`
+            : ''
+        }
         confirmLabel="Delete Project"
         onCancel={() => setDeleteTarget(null)}
         onConfirm={async () => {

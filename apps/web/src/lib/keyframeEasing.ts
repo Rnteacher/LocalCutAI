@@ -7,6 +7,16 @@ export interface WebBezierHandles {
   outY: number;
 }
 
+interface WebBezierControlPoint {
+  x: number;
+  y: number;
+}
+
+const LINEAR_OUTGOING_CONTROL: WebBezierControlPoint = { x: 1 / 3, y: 1 / 3 };
+const LINEAR_INCOMING_CONTROL: WebBezierControlPoint = { x: 2 / 3, y: 2 / 3 };
+const EASE_OUT_OUTGOING_CONTROL: WebBezierControlPoint = { x: 0.42, y: 0 };
+const EASE_IN_INCOMING_CONTROL: WebBezierControlPoint = { x: 0.58, y: 1 };
+
 function sampleCubicBezier(
   x1: number,
   y1: number,
@@ -85,3 +95,61 @@ export function applyKeyframeEasing(
   }
 }
 
+function getOutgoingControlPoint(
+  easing: WebKeyframeEasing,
+  handles?: WebBezierHandles,
+): WebBezierControlPoint {
+  switch (easing) {
+    case 'bezier':
+      return handles
+        ? { x: handles.outX, y: handles.outY }
+        : LINEAR_OUTGOING_CONTROL;
+    case 'ease-in':
+      return LINEAR_OUTGOING_CONTROL;
+    case 'ease-out':
+    case 'ease-in-out':
+      return EASE_OUT_OUTGOING_CONTROL;
+    case 'linear':
+    default:
+      return LINEAR_OUTGOING_CONTROL;
+  }
+}
+
+function getIncomingControlPoint(
+  easing: WebKeyframeEasing,
+  handles?: WebBezierHandles,
+): WebBezierControlPoint {
+  switch (easing) {
+    case 'bezier':
+      return handles
+        ? { x: handles.inX, y: handles.inY }
+        : LINEAR_INCOMING_CONTROL;
+    case 'ease-in':
+      return EASE_IN_INCOMING_CONTROL;
+    case 'ease-in-out':
+      return EASE_IN_INCOMING_CONTROL;
+    case 'ease-out':
+    case 'linear':
+    default:
+      return LINEAR_INCOMING_CONTROL;
+  }
+}
+
+export function applySegmentKeyframeEasing(
+  t: number,
+  fromEasing: WebKeyframeEasing,
+  fromHandles?: WebBezierHandles,
+  toEasing: WebKeyframeEasing = 'linear',
+  toHandles?: WebBezierHandles,
+): number {
+  const clamped = Math.max(0, Math.min(1, t));
+  const outControl = getOutgoingControlPoint(fromEasing, fromHandles);
+  const inControl = getIncomingControlPoint(toEasing, toHandles);
+  return sampleCubicBezier(
+    outControl.x,
+    outControl.y,
+    inControl.x,
+    inControl.y,
+    clamped,
+  );
+}

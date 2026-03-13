@@ -71,6 +71,14 @@ export interface ApiMediaAsset {
   metadata: Record<string, unknown>;
 }
 
+export interface ApiMediaDedupeResult {
+  totalAssets: number;
+  canonicalAssets: number;
+  dedupedAssets: number;
+  updatedSequences: number;
+  removedFiles: number;
+}
+
 export interface ApiJob {
   id: string;
   projectId: string;
@@ -152,6 +160,12 @@ export const api = {
         { method: 'POST', body: JSON.stringify({ filePaths }) },
       ).then((r) => r.data),
 
+    pick: (projectId: string) =>
+      request<{ success: boolean; data: { imported: ApiMediaAsset[]; errors: { path: string; error: string }[] } }>(
+        `/projects/${projectId}/media/pick`,
+        { method: 'POST' },
+      ).then((r) => r.data),
+
     /** Upload files via multipart form-data (native file picker / drag-and-drop). */
     upload: async (
       projectId: string,
@@ -189,6 +203,12 @@ export const api = {
       request<{ success: boolean }>(`/projects/${projectId}/media/${assetId}`, {
         method: 'DELETE',
       }),
+
+    dedupe: (projectId: string) =>
+      request<{ success: boolean; data: ApiMediaDedupeResult }>(
+        `/projects/${projectId}/media/dedupe`,
+        { method: 'POST' },
+      ).then((r) => r.data),
 
     /** URL for streaming a media file with Range support. */
     fileUrl: (assetId: string) => `/api/media-file/${assetId}`,

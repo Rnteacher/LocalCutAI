@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ReactNode, WheelEvent as ReactWheelEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
-import { applyKeyframeEasing } from '../lib/keyframeEasing.js';
+import { applySegmentKeyframeEasing } from '../lib/keyframeEasing.js';
 import type {
   TimelineClipData,
   TimelineTrackData,
@@ -56,10 +56,20 @@ const EQ_BANDS: Array<{ key: keyof TimelineClipData; label: string }> = [
   { key: 'audioEq8k', label: '8k' },
 ];
 
-const KEYFRAME_PROPERTIES: Array<{
+const MASK_CHIP_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#fb7185', '#facc15', '#60a5fa'];
+
+export const KEYFRAME_PROPERTIES: Array<{
   value: NonNullable<TimelineClipData['keyframes']>[number]['property'];
   label: string;
 }> = [
+  { value: 'speed', label: 'Speed' },
+  { value: 'volume', label: 'Volume' },
+  { value: 'pan', label: 'Pan' },
+  { value: 'brightness', label: 'Brightness' },
+  { value: 'contrast', label: 'Contrast' },
+  { value: 'saturation', label: 'Saturation' },
+  { value: 'hue', label: 'Hue' },
+  { value: 'vignette', label: 'Vignette' },
   { value: 'transform.positionX', label: 'Position X' },
   { value: 'transform.positionY', label: 'Position Y' },
   { value: 'transform.scaleX', label: 'Scale X' },
@@ -73,10 +83,109 @@ const KEYFRAME_PROPERTIES: Array<{
   { value: 'mask.expansion', label: 'Mask Expansion' },
 ];
 
-type KeyframeProperty = NonNullable<TimelineClipData['keyframes']>[number]['property'];
+export type KeyframeProperty = NonNullable<TimelineClipData['keyframes']>[number]['property'];
+
+export interface KeyframeGraphSelectOptions {
+  additive?: boolean;
+  range?: boolean;
+}
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+interface SliderRailControls {
+  left?: ReactNode;
+  right?: ReactNode;
+}
+
+export function GlyphFrame({ children }: { children: ReactNode }) {
+  return (
+    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" aria-hidden="true">
+      {children}
+    </svg>
+  );
+}
+
+export function ClockGlyph() {
+  return (
+    <GlyphFrame>
+      <circle cx="8" cy="8" r="5.25" strokeWidth="1.5" />
+      <path d="M8 5.25v3.1l2.3 1.35" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </GlyphFrame>
+  );
+}
+
+export function PrevGlyph() {
+  return (
+    <GlyphFrame>
+      <path d="M11 3.5 5.75 8 11 12.5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4.25 4v8" strokeWidth="1.8" strokeLinecap="round" />
+    </GlyphFrame>
+  );
+}
+
+export function NextGlyph() {
+  return (
+    <GlyphFrame>
+      <path d="M5 3.5 10.25 8 5 12.5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M11.75 4v8" strokeWidth="1.8" strokeLinecap="round" />
+    </GlyphFrame>
+  );
+}
+
+export function AddKeyGlyph() {
+  return (
+    <GlyphFrame>
+      <path d="m8 2.5 4.5 5.5L8 13.5 3.5 8 8 2.5Z" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M8 5.25v5.5M5.25 8h5.5" strokeWidth="1.4" strokeLinecap="round" />
+    </GlyphFrame>
+  );
+}
+
+export function TrashGlyph() {
+  return (
+    <GlyphFrame>
+      <path d="M5.25 4.5h5.5" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M6.25 4.5V3.4h3.5v1.1" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M4.75 4.5v7.1c0 .5.4.9.9.9h4.7c.5 0 .9-.4.9-.9V4.5" strokeWidth="1.5" strokeLinejoin="round" />
+      <path d="M6.75 6.4v4.2M9.25 6.4v4.2" strokeWidth="1.4" strokeLinecap="round" />
+    </GlyphFrame>
+  );
+}
+
+export function IconActionButton({
+  title,
+  onClick,
+  disabled = false,
+  active = false,
+  destructive = false,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+  destructive?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className={`flex h-6 w-6 items-center justify-center rounded border text-[10px] transition-colors disabled:opacity-35 ${
+        destructive
+          ? 'border-red-500/40 bg-red-500/10 text-red-200 hover:bg-red-500/20'
+          : active
+            ? 'border-amber-400/40 bg-amber-500/20 text-amber-100 hover:bg-amber-500/30'
+            : 'border-zinc-700 bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+      }`}
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+    >
+      {children}
+    </button>
+  );
 }
 
 function defaultBezierHandles(): { inX: number; inY: number; outX: number; outY: number } {
@@ -92,6 +201,32 @@ function keyframeValueBounds(property: KeyframeProperty, values: number[]): { mi
   let min = -1;
   let max = 1;
   switch (property) {
+    case 'speed':
+      min = -4;
+      max = 4;
+      break;
+    case 'volume':
+      min = 0;
+      max = 2;
+      break;
+    case 'pan':
+      min = -1;
+      max = 1;
+      break;
+    case 'brightness':
+    case 'contrast':
+    case 'saturation':
+      min = 0;
+      max = 2;
+      break;
+    case 'hue':
+      min = -180;
+      max = 180;
+      break;
+    case 'vignette':
+      min = -1;
+      max = 1;
+      break;
     case 'transform.positionX':
     case 'transform.positionY':
       min = -3000;
@@ -198,6 +333,7 @@ function SliderNumberField({
   step,
   onChange,
   format,
+  sliderControls,
 }: {
   label: string;
   value: number;
@@ -206,6 +342,7 @@ function SliderNumberField({
   step: number;
   onChange: (v: number) => void;
   format?: (v: number) => string;
+  sliderControls?: SliderRailControls;
 }) {
   const [text, setText] = useState(String(value));
 
@@ -249,19 +386,23 @@ function SliderNumberField({
           title={format ? format(safeValue) : String(safeValue)}
         />
       </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={safeValue}
-        onChange={(e) => {
-          const next = Number(e.target.value);
-          onChange(next);
-          setText(String(next));
-        }}
-        className="w-full accent-blue-500"
-      />
+      <div className="flex items-center gap-1.5">
+        {sliderControls?.left && <div className="flex flex-none items-center gap-1">{sliderControls.left}</div>}
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={safeValue}
+          onChange={(e) => {
+            const next = Number(e.target.value);
+            onChange(next);
+            setText(String(next));
+          }}
+          className="min-w-0 flex-1 accent-blue-500"
+        />
+        {sliderControls?.right && <div className="flex flex-none items-center gap-1">{sliderControls.right}</div>}
+      </div>
       {format && <div className="text-[10px] text-zinc-500">{format(safeValue)}</div>}
     </div>
   );
@@ -306,19 +447,26 @@ function EqGraphic({
   );
 }
 
-function KeyframeMiniGraph({
+export function KeyframeMiniGraph({
   keyframes,
   clipDuration,
   property,
   currentFrame,
   snapStep,
+  selectedKeyframeId = null,
+  selectedKeyframeIds = [],
   onCommit,
+  onSelectKeyframe,
+  onSetSelection,
+  onToggleKeyframeCurve,
 }: {
   keyframes: NonNullable<TimelineClipData['keyframes']>;
   clipDuration: number;
   property: KeyframeProperty;
   currentFrame: number;
   snapStep: number;
+  selectedKeyframeId?: string | null;
+  selectedKeyframeIds?: string[];
   onCommit: (
     keyframeId: string,
     patch: Partial<
@@ -328,8 +476,17 @@ function KeyframeMiniGraph({
       >
     >,
   ) => void;
+  onSelectKeyframe?: (keyframeId: string, options?: KeyframeGraphSelectOptions) => void;
+  onSetSelection?: (
+    ids: string[],
+    primaryId?: string | null,
+    options?: { additive?: boolean },
+  ) => void;
+  onToggleKeyframeCurve?: (keyframeId: string) => void;
 }) {
+  const clipPathId = useId();
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 960, height: 480 });
   const [draftById, setDraftById] = useState<
     Record<
       string,
@@ -340,15 +497,30 @@ function KeyframeMiniGraph({
       }
     >
   >({});
-  const [draggingPointId, setDraggingPointId] = useState<string | null>(null);
+  const [draggingPoint, setDraggingPoint] = useState<{
+    keyframeId: string;
+    minFrame: number;
+    maxFrame: number;
+  } | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<{ keyframeId: string; handle: 'in' | 'out' } | null>(
     null,
   );
+  const [panning, setPanning] = useState<{ anchorClientX: number; startFrame: number; endFrame: number } | null>(
+    null,
+  );
+  const [marquee, setMarquee] = useState<{
+    startX: number;
+    startY: number;
+    currentX: number;
+    currentY: number;
+    additive: boolean;
+  } | null>(null);
   const [viewStartFrame, setViewStartFrame] = useState(0);
   const [viewEndFrame, setViewEndFrame] = useState(Math.max(1, clipDuration));
 
   const safeSnapStep = Math.max(1, Math.round(snapStep));
   const totalDuration = Math.max(1, clipDuration);
+  const minimumFrameWindowSpan = Math.max(2, safeSnapStep);
 
   useEffect(() => {
     setDraftById({});
@@ -362,13 +534,23 @@ function KeyframeMiniGraph({
   const sorted = useMemo(() => [...keyframes].sort((a, b) => a.frame - b.frame), [keyframes]);
   const effective = useMemo(
     () =>
-      sorted.map((kf) => {
+      [...sorted.map((kf) => {
         const draft = draftById[kf.id];
         if (!draft) return kf;
-        return { ...kf, frame: draft.frame, value: draft.value };
-      }),
+        return {
+          ...kf,
+          frame: draft.frame,
+          value: draft.value,
+          bezierHandles: draft.bezierHandles ?? kf.bezierHandles,
+        };
+      })].sort((a, b) => a.frame - b.frame),
     [sorted, draftById],
   );
+  const selectedIdsSet = useMemo(() => {
+    const next = new Set(selectedKeyframeIds);
+    if (selectedKeyframeId) next.add(selectedKeyframeId);
+    return next;
+  }, [selectedKeyframeId, selectedKeyframeIds]);
 
   if (!effective.length) {
     return <div className="text-[10px] text-zinc-500">No keyframes</div>;
@@ -376,7 +558,7 @@ function KeyframeMiniGraph({
 
   const bounds = keyframeValueBounds(
     property,
-    effective.map((k) => k.value),
+    sorted.map((k) => k.value),
   );
   const span = Math.max(0.0001, bounds.max - bounds.min);
   const frameWindowStart = Math.max(0, Math.min(totalDuration, viewStartFrame));
@@ -385,12 +567,52 @@ function KeyframeMiniGraph({
     Math.min(totalDuration, viewEndFrame),
   );
   const frameWindowSpan = Math.max(1, frameWindowEnd - frameWindowStart);
+  const graphWidth = Math.max(640, Math.round(viewportSize.width || 960));
+  const graphHeight = Math.max(360, Math.round(viewportSize.height || 480));
+  const graphPadding = {
+    left: 64,
+    right: 20,
+    top: 18,
+    bottom: 30,
+  };
+  const plotWidth = Math.max(1, graphWidth - graphPadding.left - graphPadding.right);
+  const plotHeight = Math.max(1, graphHeight - graphPadding.top - graphPadding.bottom);
+  const isFrameVisible = useCallback(
+    (frame: number) => frame >= frameWindowStart && frame <= frameWindowEnd,
+    [frameWindowEnd, frameWindowStart],
+  );
   const toX = (frame: number): number =>
-    ((Math.max(frameWindowStart, Math.min(frameWindowEnd, frame)) - frameWindowStart) /
-      frameWindowSpan) *
-    100;
+    graphPadding.left +
+    ((frame - frameWindowStart) / frameWindowSpan) * plotWidth;
   const toY = (value: number): number =>
-    100 - ((value - bounds.min) / span) * 100;
+    graphPadding.top + (1 - (value - bounds.min) / span) * plotHeight;
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    const updateSize = () => {
+      const rect = svg.getBoundingClientRect();
+      const nextWidth = Math.max(640, Math.round(rect.width));
+      const nextHeight = Math.max(360, Math.round(rect.height));
+      setViewportSize((prev) =>
+        prev.width === nextWidth && prev.height === nextHeight
+          ? prev
+          : { width: nextWidth, height: nextHeight },
+      );
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateSize);
+      return () => window.removeEventListener('resize', updateSize);
+    }
+
+    const observer = new ResizeObserver(() => updateSize());
+    observer.observe(svg);
+    return () => observer.disconnect();
+  }, []);
 
   const curvePath = useMemo(() => {
     if (effective.length === 0) return '';
@@ -405,17 +627,19 @@ function KeyframeMiniGraph({
       const from = effective[i];
       const to = effective[i + 1];
       const x0 = toX(from.frame);
-      const y0 = toY(from.value);
-      if (i === 0) d += `M ${x0.toFixed(3)} ${y0.toFixed(3)}`;
+        const y0 = toY(from.value);
+        if (i === 0) d += `M ${x0.toFixed(3)} ${y0.toFixed(3)}`;
 
       const segmentFrames = Math.max(1, to.frame - from.frame);
       const steps = Math.max(8, Math.min(56, Math.round((segmentFrames / frameWindowSpan) * 160)));
       for (let step = 1; step <= steps; step++) {
         const t = step / steps;
-        const eased = applyKeyframeEasing(
+        const eased = applySegmentKeyframeEasing(
           t,
           from.easing,
           from.bezierHandles,
+          to.easing,
+          to.bezierHandles,
         );
         const frame = from.frame + segmentFrames * t;
         const value = from.value + (to.value - from.value) * eased;
@@ -424,38 +648,133 @@ function KeyframeMiniGraph({
     }
     return d;
   }, [effective, frameWindowSpan, toX, toY]);
-  const currentX =
-    ((Math.max(frameWindowStart, Math.min(frameWindowEnd, currentFrame)) - frameWindowStart) /
-      frameWindowSpan) *
-    100;
+  const currentX = toX(currentFrame);
+
+  const verticalTicks = useMemo(() => {
+    const targetCount = 8;
+    const rawStep = Math.max(1, frameWindowSpan / targetCount);
+    const niceSteps = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000];
+    const step = niceSteps.find((candidate) => candidate >= rawStep) ?? Math.ceil(rawStep);
+    const start = Math.ceil(frameWindowStart / step) * step;
+    const ticks: number[] = [];
+    for (let frame = start; frame < frameWindowEnd; frame += step) {
+      ticks.push(frame);
+    }
+    return ticks;
+  }, [frameWindowEnd, frameWindowSpan, frameWindowStart]);
+
+  const horizontalTicks = useMemo(
+    () =>
+      Array.from({ length: 5 }, (_, index) => {
+        const ratio = index / 4;
+        return bounds.max - ratio * (bounds.max - bounds.min);
+      }),
+    [bounds.max, bounds.min],
+  );
 
   const fitFrameWindow = useCallback(() => {
     setViewStartFrame(0);
     setViewEndFrame(totalDuration);
   }, [totalDuration]);
 
+  const applyFrameWindow = useCallback(
+    (nextStart: number, nextEnd: number) => {
+      if (totalDuration <= minimumFrameWindowSpan) {
+        setViewStartFrame(0);
+        setViewEndFrame(totalDuration);
+        return;
+      }
+
+      let start = Number.isFinite(nextStart) ? nextStart : 0;
+      let end = Number.isFinite(nextEnd) ? nextEnd : totalDuration;
+      let span = Math.max(minimumFrameWindowSpan, end - start);
+
+      if (start < 0) {
+        end -= start;
+        start = 0;
+      }
+      if (end > totalDuration) {
+        const over = end - totalDuration;
+        start = Math.max(0, start - over);
+        end = totalDuration;
+      }
+
+      span = Math.max(minimumFrameWindowSpan, end - start);
+      if (span > totalDuration) {
+        start = 0;
+        end = totalDuration;
+      } else if (end - start < minimumFrameWindowSpan) {
+        end = Math.min(totalDuration, start + minimumFrameWindowSpan);
+        start = Math.max(0, end - minimumFrameWindowSpan);
+      }
+
+      setViewStartFrame(start);
+      setViewEndFrame(end);
+    },
+    [minimumFrameWindowSpan, totalDuration],
+  );
+
+  const clientToGraphPoint = useCallback((clientX: number, clientY: number) => {
+    const svg = svgRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / Math.max(1, rect.width)) * graphWidth,
+      y: ((clientY - rect.top) / Math.max(1, rect.height)) * graphHeight,
+    };
+  }, [graphHeight, graphWidth]);
+
   const updateFromPointer = useCallback(
-    (keyframeId: string, clientX: number, clientY: number) => {
-      const svg = svgRef.current;
-      if (!svg) return;
-      const rect = svg.getBoundingClientRect();
-      const nx = clamp01((clientX - rect.left) / Math.max(1, rect.width));
-      const ny = clamp01((clientY - rect.top) / Math.max(1, rect.height));
+    (
+      keyframeId: string,
+      clientX: number,
+      clientY: number,
+      dragBounds?: { minFrame: number; maxFrame: number },
+    ) => {
+      const point = clientToGraphPoint(clientX, clientY);
+      if (!point) return;
+      const nx = clamp01((point.x - graphPadding.left) / plotWidth);
+      const ny = clamp01((point.y - graphPadding.top) / plotHeight);
       const rawFrame = frameWindowStart + nx * frameWindowSpan;
-      const frame = Math.max(0, Math.min(totalDuration, Math.round(rawFrame / safeSnapStep) * safeSnapStep));
+      const index = effective.findIndex((kf) => kf.id === keyframeId);
+      const minFrame =
+        dragBounds?.minFrame ??
+        (index > 0 ? effective[index - 1]!.frame + safeSnapStep : 0);
+      const maxFrame =
+        dragBounds?.maxFrame ??
+        (index >= 0 && index < effective.length - 1
+          ? effective[index + 1]!.frame - safeSnapStep
+          : totalDuration);
+      const constrainedFrame = Math.max(minFrame, Math.min(maxFrame, rawFrame));
+      const frame = Math.max(
+        0,
+        Math.min(totalDuration, Math.round(constrainedFrame / safeSnapStep) * safeSnapStep),
+      );
       const value = bounds.min + (1 - ny) * (bounds.max - bounds.min);
       setDraftById((prev) => ({ ...prev, [keyframeId]: { frame, value } }));
     },
-    [bounds.max, bounds.min, frameWindowSpan, frameWindowStart, totalDuration, safeSnapStep],
+    [
+      bounds.max,
+      bounds.min,
+      clientToGraphPoint,
+      effective,
+      frameWindowSpan,
+      frameWindowStart,
+      graphPadding.left,
+      graphPadding.top,
+      plotHeight,
+      plotWidth,
+      totalDuration,
+      safeSnapStep,
+    ],
   );
 
   const updateHandleFromPointer = useCallback(
-    (keyframeId: string, handle: 'in' | 'out', clientX: number, clientY: number) => {
-      const svg = svgRef.current;
-      if (!svg) return;
-      const rect = svg.getBoundingClientRect();
-      const px = clamp01((clientX - rect.left) / Math.max(1, rect.width)) * 100;
-      const py = clamp01((clientY - rect.top) / Math.max(1, rect.height)) * 100;
+    (keyframeId: string, handle: 'in' | 'out', clientX: number, clientY: number, breakMirror = false) => {
+      const point = clientToGraphPoint(clientX, clientY);
+      if (!point) return;
+      const px = point.x;
+      const py = point.y;
       const index = effective.findIndex((kf) => kf.id === keyframeId);
       if (index < 0) return;
       const current = effective[index];
@@ -477,7 +796,12 @@ function KeyframeMiniGraph({
           [keyframeId]: {
             frame: current.frame,
             value: current.value,
-            bezierHandles: { ...existingHandles, outX, outY },
+            bezierHandles: {
+              ...existingHandles,
+              outX,
+              outY,
+              ...(breakMirror ? {} : { inX: clamp01(1 - outX), inY: clamp01(1 - outY) }),
+            },
           },
         }));
         return;
@@ -498,29 +822,86 @@ function KeyframeMiniGraph({
         [keyframeId]: {
           frame: current.frame,
           value: current.value,
-          bezierHandles: { ...existingHandles, inX, inY },
+          bezierHandles: {
+            ...existingHandles,
+            inX,
+            inY,
+            ...(breakMirror ? {} : { outX: clamp01(1 - inX), outY: clamp01(1 - inY) }),
+          },
         },
       }));
     },
-    [effective, toX, toY],
+    [clientToGraphPoint, effective, toX, toY],
   );
 
   useEffect(() => {
-    if (!draggingPointId && !draggingHandle) return;
+    if (!draggingPoint && !draggingHandle && !panning && !marquee) return;
     const onMove = (e: MouseEvent) => {
-      if (draggingPointId) {
-        updateFromPointer(draggingPointId, e.clientX, e.clientY);
+      if (marquee) {
+        const point = clientToGraphPoint(e.clientX, e.clientY);
+        if (!point) return;
+        setMarquee((prev) =>
+          prev
+            ? {
+                ...prev,
+                currentX: point.x,
+                currentY: point.y,
+              }
+            : prev,
+        );
+        return;
+      }
+      if (panning) {
+        const svg = svgRef.current;
+        if (!svg) return;
+        const rect = svg.getBoundingClientRect();
+        const dx = e.clientX - panning.anchorClientX;
+        const deltaFrames = (dx / Math.max(1, rect.width)) * (graphWidth / plotWidth) * frameWindowSpan;
+        applyFrameWindow(panning.startFrame - deltaFrames, panning.endFrame - deltaFrames);
+        return;
+      }
+      if (draggingPoint) {
+        updateFromPointer(draggingPoint.keyframeId, e.clientX, e.clientY, draggingPoint);
         return;
       }
       if (draggingHandle) {
-        updateHandleFromPointer(draggingHandle.keyframeId, draggingHandle.handle, e.clientX, e.clientY);
+        updateHandleFromPointer(
+          draggingHandle.keyframeId,
+          draggingHandle.handle,
+          e.clientX,
+          e.clientY,
+          e.altKey,
+        );
       }
     };
     const onUp = () => {
-      if (draggingPointId) {
-        const draft = draftById[draggingPointId];
+      if (marquee) {
+        const minX = Math.min(marquee.startX, marquee.currentX);
+        const maxX = Math.max(marquee.startX, marquee.currentX);
+        const minY = Math.min(marquee.startY, marquee.currentY);
+        const maxY = Math.max(marquee.startY, marquee.currentY);
+        const hitRadius = 8;
+        const nextIds = effective
+          .filter((keyframe) => {
+            if (!isFrameVisible(keyframe.frame)) return false;
+            const x = toX(keyframe.frame);
+            const y = toY(keyframe.value);
+            return (
+              x + hitRadius >= minX &&
+              x - hitRadius <= maxX &&
+              y + hitRadius >= minY &&
+              y - hitRadius <= maxY
+            );
+          })
+          .map((keyframe) => keyframe.id);
+        onSetSelection?.(nextIds, nextIds[nextIds.length - 1] ?? null, {
+          additive: marquee.additive,
+        });
+      }
+      if (draggingPoint) {
+        const draft = draftById[draggingPoint.keyframeId];
         if (draft) {
-          onCommit(draggingPointId, { frame: draft.frame, value: draft.value });
+          onCommit(draggingPoint.keyframeId, { frame: draft.frame, value: draft.value });
         }
       }
       if (draggingHandle) {
@@ -529,11 +910,13 @@ function KeyframeMiniGraph({
           onCommit(draggingHandle.keyframeId, { bezierHandles: draft.bezierHandles });
         }
       }
-      setDraggingPointId(null);
+      setDraggingPoint(null);
       setDraggingHandle(null);
+      setPanning(null);
+      setMarquee(null);
       setDraftById((prev) => {
         const next = { ...prev };
-        if (draggingPointId) delete next[draggingPointId];
+        if (draggingPoint) delete next[draggingPoint.keyframeId];
         if (draggingHandle) delete next[draggingHandle.keyframeId];
         return next;
       });
@@ -544,81 +927,198 @@ function KeyframeMiniGraph({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [draggingPointId, draggingHandle, draftById, onCommit, updateFromPointer, updateHandleFromPointer]);
+  }, [
+    clientToGraphPoint,
+    applyFrameWindow,
+    draggingPoint,
+    draggingHandle,
+    draftById,
+    frameWindowSpan,
+    marquee,
+    onCommit,
+    onSetSelection,
+    panning,
+    graphWidth,
+    isFrameVisible,
+    plotWidth,
+    toX,
+    toY,
+    effective,
+    updateFromPointer,
+    updateHandleFromPointer,
+  ]);
 
   const onGraphWheel = useCallback(
-    (e: ReactWheelEvent<SVGSVGElement>) => {
-      e.preventDefault();
-      if (!svgRef.current) return;
-      const rect = svgRef.current.getBoundingClientRect();
-      const nx = clamp01((e.clientX - rect.left) / Math.max(1, rect.width));
+    (clientX: number, deltaY: number, shiftKey: boolean) => {
+      const point = clientToGraphPoint(clientX, 0);
+      if (!point) return;
+      const nx = clamp01((point.x - graphPadding.left) / plotWidth);
       const focalFrame = frameWindowStart + nx * frameWindowSpan;
-      const minSpan = Math.max(2, safeSnapStep);
+      const minSpan = minimumFrameWindowSpan;
 
-      if (e.shiftKey) {
-        const deltaFrames = (e.deltaY / 120) * frameWindowSpan * 0.2;
-        let nextStart = frameWindowStart + deltaFrames;
-        let nextEnd = frameWindowEnd + deltaFrames;
-        if (nextStart < 0) {
-          nextEnd -= nextStart;
-          nextStart = 0;
-        }
-        if (nextEnd > totalDuration) {
-          const over = nextEnd - totalDuration;
-          nextStart = Math.max(0, nextStart - over);
-          nextEnd = totalDuration;
-        }
-        setViewStartFrame(Math.max(0, Math.round(nextStart)));
-        setViewEndFrame(Math.max(minSpan, Math.round(nextEnd)));
+      if (shiftKey) {
+        const deltaFrames = (deltaY / 120) * Math.max(minSpan, frameWindowSpan * 0.18);
+        applyFrameWindow(frameWindowStart + deltaFrames, frameWindowEnd + deltaFrames);
         return;
       }
 
-      const zoomFactor = e.deltaY > 0 ? 1.12 : 0.88;
+      const zoomFactor = Math.exp(Math.max(-0.45, Math.min(0.45, deltaY * 0.0022)));
       let nextSpan = Math.max(minSpan, Math.min(totalDuration, frameWindowSpan * zoomFactor));
       if (totalDuration <= minSpan) nextSpan = totalDuration;
 
       const ratio = frameWindowSpan > 0 ? (focalFrame - frameWindowStart) / frameWindowSpan : 0.5;
       let nextStart = focalFrame - nextSpan * ratio;
       let nextEnd = nextStart + nextSpan;
-      if (nextStart < 0) {
-        nextEnd -= nextStart;
-        nextStart = 0;
-      }
-      if (nextEnd > totalDuration) {
-        const over = nextEnd - totalDuration;
-        nextStart = Math.max(0, nextStart - over);
-        nextEnd = totalDuration;
-      }
-      if (nextEnd - nextStart < minSpan && totalDuration > minSpan) {
-        nextEnd = Math.min(totalDuration, nextStart + minSpan);
-      }
-      setViewStartFrame(Math.max(0, Math.round(nextStart)));
-      setViewEndFrame(Math.max(1, Math.round(nextEnd)));
+      applyFrameWindow(nextStart, nextEnd);
     },
     [
-      frameWindowEnd,
+      applyFrameWindow,
       frameWindowSpan,
       frameWindowStart,
-      safeSnapStep,
+      frameWindowEnd,
+      minimumFrameWindowSpan,
+      clientToGraphPoint,
       totalDuration,
+      graphPadding.left,
+      plotWidth,
     ],
   );
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onGraphWheel(event.clientX, event.deltaY, event.shiftKey);
+    };
+    svg.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      svg.removeEventListener('wheel', handleWheel);
+    };
+  }, [onGraphWheel]);
 
   return (
     <svg
       ref={svgRef}
-      viewBox="0 0 100 100"
-      className="h-28 w-full rounded border border-zinc-700 bg-zinc-900/50"
-      onWheel={onGraphWheel}
+      viewBox={`0 0 ${graphWidth} ${graphHeight}`}
+      className={`block h-[30rem] min-h-[30rem] w-full flex-none shrink-0 rounded border border-zinc-700 bg-zinc-900/50 ${
+        panning ? 'cursor-grabbing' : 'cursor-default'
+      }`}
       onDoubleClick={fitFrameWindow}
     >
-      <line x1={currentX} y1={0} x2={currentX} y2={100} stroke="#334155" strokeWidth="0.8" />
-      <text x={2} y={8} fill="#64748b" fontSize="4" fontFamily="monospace">
-        {`${frameWindowStart}f-${frameWindowEnd}f | snap ${safeSnapStep}f`}
+      <defs>
+        <clipPath id={clipPathId}>
+          <rect
+            x={graphPadding.left}
+            y={graphPadding.top}
+            width={plotWidth}
+            height={plotHeight}
+          />
+        </clipPath>
+      </defs>
+      <rect
+        x={0}
+        y={0}
+        width={graphWidth}
+        height={graphHeight}
+        fill="transparent"
+        onMouseDown={(e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            setPanning({
+              anchorClientX: e.clientX,
+              startFrame: frameWindowStart,
+              endFrame: frameWindowEnd,
+            });
+            return;
+          }
+          if (e.button !== 0) return;
+          const point = clientToGraphPoint(e.clientX, e.clientY);
+          if (!point) return;
+          e.preventDefault();
+          if (!(e.shiftKey || e.ctrlKey || e.metaKey)) {
+            onSetSelection?.([], null, { additive: false });
+          }
+          setMarquee({
+            startX: point.x,
+            startY: point.y,
+            currentX: point.x,
+            currentY: point.y,
+            additive: e.shiftKey || e.ctrlKey || e.metaKey,
+          });
+        }}
+      />
+      {verticalTicks.map((frame) => {
+        const x = toX(frame);
+        return (
+          <g key={`grid-x-${frame}`} pointerEvents="none">
+            <line
+              x1={x}
+              y1={graphPadding.top}
+              x2={x}
+              y2={graphHeight - graphPadding.bottom}
+              stroke="#1f2937"
+              strokeWidth="1"
+              strokeDasharray="2.5 3.5"
+            />
+            <text
+              x={Math.min(graphWidth - 28, x + 4)}
+              y={graphHeight - 8}
+              fill="#475569"
+              fontSize="11"
+              fontFamily="monospace"
+            >
+              {frame}f
+            </text>
+          </g>
+        );
+      })}
+      {horizontalTicks.map((value, index) => {
+        const y = toY(value);
+        return (
+          <g key={`grid-y-${index}`} pointerEvents="none">
+            <line
+              x1={graphPadding.left}
+              y1={y}
+              x2={graphWidth - graphPadding.right}
+              y2={y}
+              stroke="#111827"
+              strokeWidth="1"
+              strokeDasharray="2 3"
+            />
+            <text
+              x={8}
+              y={Math.max(14, Math.min(graphHeight - 12, y - 4))}
+              fill="#475569"
+              fontSize="11"
+              fontFamily="monospace"
+            >
+              {value.toFixed(Math.abs(value) >= 10 ? 0 : 2)}
+            </text>
+          </g>
+        );
+      })}
+      <line
+        x1={currentX}
+        y1={graphPadding.top}
+        x2={currentX}
+        y2={graphHeight - graphPadding.bottom}
+        stroke="#334155"
+        strokeWidth="1.5"
+        pointerEvents="none"
+      />
+      <text x={graphPadding.left} y={14} fill="#64748b" fontSize="11" fontFamily="monospace" pointerEvents="none">
+        {`${Math.round(frameWindowStart)}f-${Math.round(frameWindowEnd)}f | snap ${safeSnapStep}f`}
       </text>
-      <path fill="none" stroke="#60a5fa" strokeWidth="1.6" d={curvePath} />
+      <g clipPath={`url(#${clipPathId})`}>
+      <path fill="none" stroke="#60a5fa" strokeWidth="3" d={curvePath} pointerEvents="none" />
       {effective.map((k, index) => {
+        if (!isFrameVisible(k.frame)) return null;
         if (k.easing !== 'bezier') return null;
+        const showHandles =
+          selectedIdsSet.has(k.id) || draggingHandle?.keyframeId === k.id;
+        if (!showHandles) return null;
         const handles = k.bezierHandles ?? defaultBezierHandles();
         const x = toX(k.frame);
         const y = toY(k.value);
@@ -636,36 +1136,40 @@ function KeyframeMiniGraph({
           <g key={`handle-${k.id}`}>
             {inHX != null && inHY != null && (
               <>
-                <line x1={x} y1={y} x2={inHX} y2={inHY} stroke="#64748b" strokeWidth="0.8" />
+                <line x1={x} y1={y} x2={inHX} y2={inHY} stroke="#64748b" strokeWidth="1.1" />
                 <circle
                   cx={inHX}
                   cy={inHY}
-                  r="1.8"
+                  r="6"
                   fill="#94a3b8"
+                  stroke="#0f172a"
+                  strokeWidth="1.4"
                   className="cursor-crosshair"
                   onMouseDown={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    onSelectKeyframe?.(k.id);
                     setDraggingHandle({ keyframeId: k.id, handle: 'in' });
-                    updateHandleFromPointer(k.id, 'in', e.clientX, e.clientY);
                   }}
                 />
               </>
             )}
             {outHX != null && outHY != null && (
               <>
-                <line x1={x} y1={y} x2={outHX} y2={outHY} stroke="#64748b" strokeWidth="0.8" />
+                <line x1={x} y1={y} x2={outHX} y2={outHY} stroke="#64748b" strokeWidth="1.1" />
                 <circle
                   cx={outHX}
                   cy={outHY}
-                  r="1.8"
+                  r="6"
                   fill="#94a3b8"
+                  stroke="#0f172a"
+                  strokeWidth="1.4"
                   className="cursor-crosshair"
                   onMouseDown={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
+                    onSelectKeyframe?.(k.id);
                     setDraggingHandle({ keyframeId: k.id, handle: 'out' });
-                    updateHandleFromPointer(k.id, 'out', e.clientX, e.clientY);
                   }}
                 />
               </>
@@ -674,25 +1178,128 @@ function KeyframeMiniGraph({
         );
       })}
       {effective.map((k) => {
+        if (!isFrameVisible(k.frame)) return null;
         const x = toX(k.frame);
         const y = toY(k.value);
+        const isSelected = selectedIdsSet.has(k.id);
         return (
           <circle
             key={k.id}
             cx={x}
             cy={y}
-            r="2.6"
-            fill={draggingPointId === k.id ? '#bfdbfe' : '#93c5fd'}
+            r={isSelected ? 8 : 7}
+            fill={draggingPoint?.keyframeId === k.id ? '#bfdbfe' : isSelected ? '#fef08a' : '#93c5fd'}
+            stroke={isSelected ? '#f59e0b' : '#1e293b'}
+            strokeWidth="1.8"
             className="cursor-pointer"
             onMouseDown={(e) => {
               e.preventDefault();
-              setDraggingPointId(k.id);
-              updateFromPointer(k.id, e.clientX, e.clientY);
+              e.stopPropagation();
+              const isAdditive = e.shiftKey || e.ctrlKey || e.metaKey;
+              onSelectKeyframe?.(k.id, isAdditive ? { additive: true } : undefined);
+              if (isAdditive) return;
+              const index = sorted.findIndex((candidate) => candidate.id === k.id);
+              const minFrame = index > 0 ? sorted[index - 1]!.frame + safeSnapStep : 0;
+              const maxFrame =
+                index >= 0 && index < sorted.length - 1
+                  ? sorted[index + 1]!.frame - safeSnapStep
+                  : totalDuration;
+              setDraggingPoint({ keyframeId: k.id, minFrame, maxFrame });
+            }}
+            onDoubleClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSelectKeyframe?.(k.id);
+              onToggleKeyframeCurve?.(k.id);
             }}
           />
         );
       })}
+      </g>
+      {marquee && (
+        <rect
+          x={Math.min(marquee.startX, marquee.currentX)}
+          y={Math.min(marquee.startY, marquee.currentY)}
+          width={Math.abs(marquee.currentX - marquee.startX)}
+          height={Math.abs(marquee.currentY - marquee.startY)}
+          fill="rgba(96, 165, 250, 0.12)"
+          stroke="#60a5fa"
+          strokeWidth="0.8"
+          strokeDasharray="1.6 1.6"
+          pointerEvents="none"
+        />
+      )}
     </svg>
+  );
+}
+
+function InlineKeyframeControls({
+  active,
+  label,
+  currentFrame,
+  onToggle,
+  onPrev,
+  onAdd,
+  onNext,
+  onClear,
+  disableNav = false,
+  disableAdd = false,
+  disableClear = false,
+}: {
+  active: boolean;
+  label: string;
+  currentFrame: number;
+  onToggle: () => void;
+  onPrev: () => void;
+  onAdd: () => void;
+  onNext: () => void;
+  onClear?: () => void;
+  disableNav?: boolean;
+  disableAdd?: boolean;
+  disableClear?: boolean;
+}) {
+  const frameLabel = `${Math.max(0, Math.round(currentFrame))}f`;
+
+  return (
+    <div className="mt-1 flex items-center justify-between gap-2 text-[10px]">
+      <div className="flex items-center gap-1">
+        <IconActionButton
+          title={
+            active
+              ? `Disable ${label} keyframes (with confirmation)`
+              : `Enable ${label} keyframes and add keyframe at playhead`
+          }
+          onClick={onToggle}
+          active={active}
+        >
+          <ClockGlyph />
+        </IconActionButton>
+        <span className="rounded bg-zinc-900/60 px-1 py-0.5 font-mono text-zinc-500">
+          {frameLabel}
+        </span>
+      </div>
+      <div className="flex items-center gap-1">
+        <IconActionButton title={`Previous ${label} keyframe`} onClick={onPrev} disabled={disableNav}>
+          <PrevGlyph />
+        </IconActionButton>
+        <IconActionButton title={`Add/update ${label} keyframe at playhead`} onClick={onAdd} disabled={disableAdd}>
+          <AddKeyGlyph />
+        </IconActionButton>
+        <IconActionButton title={`Next ${label} keyframe`} onClick={onNext} disabled={disableNav}>
+          <NextGlyph />
+        </IconActionButton>
+        {onClear && (
+          <IconActionButton
+            title={`Delete ${label} keyframes`}
+            onClick={onClear}
+            disabled={disableClear}
+            destructive
+          >
+            <TrashGlyph />
+          </IconActionButton>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -700,8 +1307,12 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const setActivePanel = useSelectionStore((s) => s.setActivePanel);
   const activePanel = useSelectionStore((s) => s.activePanel);
   const selectedClipIds = useSelectionStore((s) => s.selectedClipIds);
+  const activeMaskClipId = useSelectionStore((s) => s.activeMaskClipId);
+  const activeMaskId = useSelectionStore((s) => s.activeMaskId);
+  const setActiveMaskSelection = useSelectionStore((s) => s.setActiveMaskSelection);
+  const linkScale = useSelectionStore((s) => s.linkedScale);
+  const setLinkScale = useSelectionStore((s) => s.setLinkedScale);
   const autoKeyframeEnabled = useSelectionStore((s) => s.autoKeyframeEnabled);
-  const setAutoKeyframeEnabled = useSelectionStore((s) => s.setAutoKeyframeEnabled);
   const sourceAsset = useSelectionStore((s) => s.sourceAsset);
   const sourceInTime = useSelectionStore((s) => s.sourceInTime);
   const sourceOutTime = useSelectionStore((s) => s.sourceOutTime);
@@ -716,8 +1327,6 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const removeClipMask = useProjectStore((s) => s.removeClipMask);
   const upsertMaskShapeKeyframe = useProjectStore((s) => s.upsertMaskShapeKeyframe);
   const removeMaskShapeKeyframe = useProjectStore((s) => s.removeMaskShapeKeyframe);
-  const insertMaskPointAcrossKeyframes = useProjectStore((s) => s.insertMaskPointAcrossKeyframes);
-  const removeMaskPointAcrossKeyframes = useProjectStore((s) => s.removeMaskPointAcrossKeyframes);
   const currentFrame = usePlaybackStore((s) => s.currentFrame);
   const setCurrentFrame = usePlaybackStore((s) => s.setCurrentFrame);
   const fps = usePlaybackStore((s) => s.fps);
@@ -728,18 +1337,8 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const [audioOpen, setAudioOpen] = useState(false);
   const [compositingOpen, setCompositingOpen] = useState(false);
   const [transitionsOpen, setTransitionsOpen] = useState(false);
-  const [keyframesOpen, setKeyframesOpen] = useState(false);
   const [masksOpen, setMasksOpen] = useState(false);
-  const [linkScale, setLinkScale] = useState(true);
-  const [kfProperty, setKfProperty] = useState<KeyframeProperty>('transform.positionX');
-  const [graphSnapStep, setGraphSnapStep] = useState(1);
-  const [selectedMaskId, setSelectedMaskId] = useState<string | null>(null);
   const [selectedMaskKeyframeId, setSelectedMaskKeyframeId] = useState<string | null>(null);
-  const [selectedMaskPointIndex, setSelectedMaskPointIndex] = useState(0);
-  const [maskMoveX, setMaskMoveX] = useState(0);
-  const [maskMoveY, setMaskMoveY] = useState(0);
-  const [maskScalePct, setMaskScalePct] = useState(100);
-  const [maskRotateDeg, setMaskRotateDeg] = useState(0);
 
   const selectedClip: TimelineClipData | null = (() => {
     if (selectedClipIds.size !== 1) return null;
@@ -825,6 +1424,24 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const widthPx = Math.round(baseWidth * Math.abs(scaleX));
   const heightPx = Math.round(baseHeight * Math.abs(scaleY));
 
+  const getClipLocalFrame = useCallback(
+    (clip: TimelineClipData | null): number => {
+      if (!clip) return 0;
+      return Math.max(0, Math.min(clip.durationFrames, currentFrame - clip.startFrame));
+    },
+    [currentFrame],
+  );
+
+  const getClipPropertyKeyframes = useCallback(
+    (clip: TimelineClipData | null, property: KeyframeProperty) => {
+      if (!clip) return [];
+      return [...(clip.keyframes ?? [])]
+        .filter((kf) => kf.property === property)
+        .sort((a, b) => a.frame - b.frame);
+    },
+    [],
+  );
+
   const resolveAutoKeyProperty = useCallback(
     (
       key: keyof TimelineClipData,
@@ -835,20 +1452,32 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       if (key === 'scaleY') return 'transform.scaleY';
       if (key === 'rotation') return 'transform.rotation';
       if (key === 'opacity') return 'opacity';
+      if (key === 'speed') return 'speed';
+      if (key === 'brightness') return 'brightness';
+      if (key === 'contrast') return 'contrast';
+      if (key === 'saturation') return 'saturation';
+      if (key === 'hue') return 'hue';
+      if (key === 'vignette') return 'vignette';
+      if (key === 'pan' || key === 'audioPan') return 'pan';
+      if (key === 'gain' || key === 'audioVolume' || key === 'audioGainDb') return 'volume';
       return null;
     },
     [],
   );
 
-  const maybeAutoKeyframe = useCallback(
-    (clip: TimelineClipData, key: keyof TimelineClipData, value: number) => {
-      if (!autoKeyframeEnabled) return;
-      const property = resolveAutoKeyProperty(key);
-      if (!property) return;
+  const upsertPropertyKeyframeValue = useCallback(
+    (
+      clip: TimelineClipData,
+      property: KeyframeProperty,
+      value: number,
+      forceForClockedProperty = false,
+    ) => {
+      const keyframes = getClipPropertyKeyframes(clip, property);
+      if (!forceForClockedProperty && !autoKeyframeEnabled && keyframes.length === 0) {
+        return;
+      }
       const localFrame = Math.max(0, Math.min(clip.durationFrames, currentFrame - clip.startFrame));
-      const existing = (clip.keyframes ?? []).find(
-        (kf) => kf.property === property && kf.frame === localFrame,
-      );
+      const existing = keyframes.find((kf) => kf.frame === localFrame);
       void upsertClipKeyframe(clip.id, {
         id: existing?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12),
         property,
@@ -858,22 +1487,34 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
         bezierHandles: existing?.bezierHandles,
       });
     },
-    [autoKeyframeEnabled, currentFrame, resolveAutoKeyProperty, upsertClipKeyframe],
+    [autoKeyframeEnabled, currentFrame, getClipPropertyKeyframes, upsertClipKeyframe],
   );
 
   const updateProp = useCallback(
     (key: keyof TimelineClipData, value: number) => {
       if (!selectedClip) return;
       void updateClipProperties(selectedClip.id, { [key]: value });
-      maybeAutoKeyframe(selectedClip, key, value);
+      const property = resolveAutoKeyProperty(key);
+      if (!property) return;
+      const hasClockedKeyframes = getClipPropertyKeyframes(selectedClip, property).length > 0;
+      upsertPropertyKeyframeValue(selectedClip, property, value, hasClockedKeyframes);
     },
-    [selectedClip, updateClipProperties, maybeAutoKeyframe],
+    [
+      selectedClip,
+      updateClipProperties,
+      resolveAutoKeyProperty,
+      getClipPropertyKeyframes,
+      upsertPropertyKeyframeValue,
+    ],
   );
 
   const updateScaleX = useCallback(
     (v: number) => {
       if (!selectedClip) return;
       const next = clampScale(v);
+      const scaleXClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleX').length > 0;
+      const scaleYClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleY').length > 0;
+      const keepLinkedKeyframes = linkScale && (scaleXClocked || scaleYClocked);
       if (linkScale) {
         const sySign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
         const nextY = clampScale(Math.abs(next) * sySign);
@@ -881,20 +1522,23 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
           scaleX: next,
           scaleY: nextY,
         });
-        maybeAutoKeyframe(selectedClip, 'scaleX', next);
-        maybeAutoKeyframe(selectedClip, 'scaleY', nextY);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleX', next, keepLinkedKeyframes);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleY', nextY, keepLinkedKeyframes);
       } else {
         void updateClipProperties(selectedClip.id, { scaleX: next });
-        maybeAutoKeyframe(selectedClip, 'scaleX', next);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleX', next, scaleXClocked);
       }
     },
-    [selectedClip, linkScale, updateClipProperties, maybeAutoKeyframe],
+    [selectedClip, linkScale, updateClipProperties, getClipPropertyKeyframes, upsertPropertyKeyframeValue],
   );
 
   const updateScaleY = useCallback(
     (v: number) => {
       if (!selectedClip) return;
       const next = clampScale(v);
+      const scaleXClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleX').length > 0;
+      const scaleYClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleY').length > 0;
+      const keepLinkedKeyframes = linkScale && (scaleXClocked || scaleYClocked);
       if (linkScale) {
         const sxSign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
         const nextX = clampScale(Math.abs(next) * sxSign);
@@ -902,14 +1546,14 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
           scaleX: nextX,
           scaleY: next,
         });
-        maybeAutoKeyframe(selectedClip, 'scaleX', nextX);
-        maybeAutoKeyframe(selectedClip, 'scaleY', next);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleX', nextX, keepLinkedKeyframes);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleY', next, keepLinkedKeyframes);
       } else {
         void updateClipProperties(selectedClip.id, { scaleY: next });
-        maybeAutoKeyframe(selectedClip, 'scaleY', next);
+        upsertPropertyKeyframeValue(selectedClip, 'transform.scaleY', next, scaleYClocked);
       }
     },
-    [selectedClip, linkScale, updateClipProperties, maybeAutoKeyframe],
+    [selectedClip, linkScale, updateClipProperties, getClipPropertyKeyframes, upsertPropertyKeyframeValue],
   );
 
   const fitToFrame = useCallback(() => {
@@ -928,17 +1572,22 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       positionX: 0,
       positionY: 0,
     });
-    maybeAutoKeyframe(selectedClip, 'scaleX', nextScaleX);
-    maybeAutoKeyframe(selectedClip, 'scaleY', nextScaleY);
-    maybeAutoKeyframe(selectedClip, 'positionX', 0);
-    maybeAutoKeyframe(selectedClip, 'positionY', 0);
+    const scaleXClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleX').length > 0;
+    const scaleYClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleY').length > 0;
+    const posXClocked = getClipPropertyKeyframes(selectedClip, 'transform.positionX').length > 0;
+    const posYClocked = getClipPropertyKeyframes(selectedClip, 'transform.positionY').length > 0;
+    upsertPropertyKeyframeValue(selectedClip, 'transform.scaleX', nextScaleX, scaleXClocked);
+    upsertPropertyKeyframeValue(selectedClip, 'transform.scaleY', nextScaleY, scaleYClocked);
+    upsertPropertyKeyframeValue(selectedClip, 'transform.positionX', 0, posXClocked);
+    upsertPropertyKeyframeValue(selectedClip, 'transform.positionY', 0, posYClocked);
   }, [
     selectedClip,
     clipAsset,
     seqResolution.width,
     seqResolution.height,
     updateClipProperties,
-    maybeAutoKeyframe,
+    getClipPropertyKeyframes,
+    upsertPropertyKeyframeValue,
   ]);
 
   const updateWidth = useCallback(
@@ -965,28 +1614,14 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     ? Math.max(0, Math.min(selectedClip.durationFrames, currentFrame - selectedClip.startFrame))
     : 0;
 
-  const selectedPropertyKeyframes = useMemo(() => {
-    if (!selectedClip?.keyframes) return [];
-    return selectedClip.keyframes
-      .filter((kf) => kf.property === kfProperty)
-      .sort((a, b) => a.frame - b.frame);
-  }, [selectedClip?.keyframes, kfProperty]);
-
   const clipMasks = useMemo(() => selectedClip?.masks ?? [], [selectedClip?.masks]);
   const selectedMask = useMemo(
-    () => clipMasks.find((m) => m.id === selectedMaskId) ?? clipMasks[0] ?? null,
-    [clipMasks, selectedMaskId],
+    () => {
+      const effectiveMaskId = selectedClip?.id != null && activeMaskClipId === selectedClip.id ? activeMaskId : null;
+      return clipMasks.find((m) => m.id === effectiveMaskId) ?? clipMasks[0] ?? null;
+    },
+    [clipMasks, selectedClip?.id, activeMaskClipId, activeMaskId],
   );
-
-  useEffect(() => {
-    if (!selectedMask) {
-      setSelectedMaskId(null);
-      return;
-    }
-    if (selectedMaskId !== selectedMask.id) {
-      setSelectedMaskId(selectedMask.id);
-    }
-  }, [selectedMask, selectedMaskId]);
 
   const selectedMaskKeyframes = useMemo(
     () => [...(selectedMask?.keyframes ?? [])].sort((a, b) => a.frame - b.frame),
@@ -1014,23 +1649,6 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     }
   }, [selectedMaskKeyframe, selectedMaskKeyframeId]);
 
-  useEffect(() => {
-    if (!selectedMaskKeyframe || selectedMaskKeyframe.points.length === 0) {
-      setSelectedMaskPointIndex(0);
-      return;
-    }
-    if (selectedMaskPointIndex >= selectedMaskKeyframe.points.length) {
-      setSelectedMaskPointIndex(Math.max(0, selectedMaskKeyframe.points.length - 1));
-    }
-  }, [selectedMaskKeyframe, selectedMaskPointIndex]);
-
-  useEffect(() => {
-    setMaskMoveX(0);
-    setMaskMoveY(0);
-    setMaskScalePct(100);
-    setMaskRotateDeg(0);
-  }, [selectedMaskKeyframe?.id]);
-
   const cloneMaskPoints = useCallback((points: MaskPoint[]): MaskPoint[] => {
     return points.map((p) => ({
       x: p.x,
@@ -1057,75 +1675,149 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     ];
   }, [baseHeight, baseWidth]);
 
-  const getPropertyValueAtCurrent = useCallback((): number => {
-    if (!selectedClip) return 0;
-    switch (kfProperty) {
-      case 'transform.positionX':
-        return selectedClip.positionX ?? 0;
-      case 'transform.positionY':
-        return selectedClip.positionY ?? 0;
-      case 'transform.scaleX':
-        return selectedClip.scaleX ?? 1;
-      case 'transform.scaleY':
-        return selectedClip.scaleY ?? 1;
-      case 'transform.rotation':
-        return selectedClip.rotation ?? 0;
-      case 'transform.anchorX':
-      case 'transform.anchorY':
-        return 0.5;
-      case 'opacity':
-        return selectedClip.opacity ?? 1;
-      case 'mask.opacity':
-        return selectedMask?.opacity ?? 1;
-      case 'mask.feather':
-        return selectedMask?.feather ?? 0;
-      case 'mask.expansion':
-        return selectedMask?.expansion ?? 0;
-      default:
-        return 0;
-    }
-  }, [selectedClip, kfProperty, selectedMask?.opacity, selectedMask?.feather, selectedMask?.expansion]);
+  const getPropertyValueAtCurrent = useCallback(
+    (clip: TimelineClipData | null, property: KeyframeProperty): number => {
+      if (!clip) return 0;
+      switch (property) {
+        case 'speed':
+          return clip.speed ?? 1;
+        case 'volume': {
+          const db = clip.audioGainDb ?? gainToDb(clip.gain ?? clip.audioVolume ?? 1);
+          return Math.max(0, dbToGain(db));
+        }
+        case 'pan':
+          return clip.pan ?? clip.audioPan ?? 0;
+        case 'brightness':
+          return clip.brightness ?? 1;
+        case 'contrast':
+          return clip.contrast ?? 1;
+        case 'saturation':
+          return clip.saturation ?? 1;
+        case 'hue':
+          return clip.hue ?? 0;
+        case 'vignette':
+          return clip.vignette ?? 0;
+        case 'transform.positionX':
+          return clip.positionX ?? 0;
+        case 'transform.positionY':
+          return clip.positionY ?? 0;
+        case 'transform.scaleX':
+          return clip.scaleX ?? 1;
+        case 'transform.scaleY':
+          return clip.scaleY ?? 1;
+        case 'transform.rotation':
+          return clip.rotation ?? 0;
+        case 'transform.anchorX':
+        case 'transform.anchorY':
+          return 0.5;
+        case 'opacity':
+          return clip.opacity ?? 1;
+        case 'mask.opacity':
+          return (clip.id === selectedClip?.id ? selectedMask?.opacity : clip.masks?.[0]?.opacity) ?? 1;
+        case 'mask.feather':
+          return (clip.id === selectedClip?.id ? selectedMask?.feather : clip.masks?.[0]?.feather) ?? 0;
+        case 'mask.expansion':
+          return (clip.id === selectedClip?.id
+            ? selectedMask?.expansion
+            : clip.masks?.[0]?.expansion) ?? 0;
+        default:
+          return 0;
+      }
+    },
+    [
+      selectedClip?.id,
+      selectedMask?.opacity,
+      selectedMask?.feather,
+      selectedMask?.expansion,
+    ],
+  );
 
-  const addKeyframeAtPlayhead = useCallback(() => {
-    if (!selectedClip) return;
-    const frame = clipLocalFrame;
-    void upsertClipKeyframe(selectedClip.id, {
-      id: crypto.randomUUID().replace(/-/g, '').slice(0, 12),
-      property: kfProperty,
-      frame,
-      value: getPropertyValueAtCurrent(),
-      easing: 'linear',
-    });
-  }, [selectedClip, clipLocalFrame, kfProperty, getPropertyValueAtCurrent, upsertClipKeyframe]);
-
-  const updateSelectedKeyframe = useCallback(
-    (
-      keyframeId: string,
-      patch: Partial<
-        Pick<
-          NonNullable<TimelineClipData['keyframes']>[number],
-          'frame' | 'value' | 'easing' | 'bezierHandles'
-        >
-      >,
-    ) => {
-      if (!selectedClip) return;
-      const existing = selectedPropertyKeyframes.find((kf) => kf.id === keyframeId);
-      if (!existing) return;
-      const nextEasing = patch.easing ?? existing.easing;
-      const nextHandles =
-        patch.bezierHandles ??
-        (nextEasing === 'bezier'
-          ? existing.bezierHandles ?? defaultBezierHandles()
-          : existing.bezierHandles);
-      void upsertClipKeyframe(selectedClip.id, {
-        ...existing,
-        frame: patch.frame != null ? Math.max(0, Math.round(patch.frame)) : existing.frame,
-        value: patch.value ?? existing.value,
-        easing: nextEasing,
-        bezierHandles: nextHandles,
+  const addOrUpdatePropertyKeyframe = useCallback(
+    (property: KeyframeProperty, clipOverride?: TimelineClipData | null) => {
+      const targetClip = clipOverride ?? selectedClip;
+      if (!targetClip) return;
+      const frame = getClipLocalFrame(targetClip);
+      const existing = getClipPropertyKeyframes(targetClip, property).find((kf) => kf.frame === frame);
+      void upsertClipKeyframe(targetClip.id, {
+        id: existing?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        property,
+        frame,
+        value: getPropertyValueAtCurrent(targetClip, property),
+        easing: existing?.easing ?? 'linear',
+        bezierHandles: existing?.bezierHandles,
       });
     },
-    [selectedClip, selectedPropertyKeyframes, upsertClipKeyframe],
+    [
+      selectedClip,
+      getClipLocalFrame,
+      getClipPropertyKeyframes,
+      upsertClipKeyframe,
+      getPropertyValueAtCurrent,
+    ],
+  );
+
+  const jumpPropertyKeyframe = useCallback(
+    (property: KeyframeProperty, direction: -1 | 1, clipOverride?: TimelineClipData | null) => {
+      const targetClip = clipOverride ?? selectedClip;
+      if (!targetClip) return;
+      const localFrame = getClipLocalFrame(targetClip);
+      const keyframes = getClipPropertyKeyframes(targetClip, property);
+      if (keyframes.length === 0) return;
+      if (direction < 0) {
+        const prev = [...keyframes].reverse().find((kf) => kf.frame < localFrame);
+        const target = prev ?? keyframes[0];
+        setCurrentFrame(Math.max(0, targetClip.startFrame + target.frame));
+        return;
+      }
+      const next = keyframes.find((kf) => kf.frame > localFrame);
+      const target = next ?? keyframes[keyframes.length - 1];
+      setCurrentFrame(Math.max(0, targetClip.startFrame + target.frame));
+    },
+    [selectedClip, getClipLocalFrame, getClipPropertyKeyframes, setCurrentFrame],
+  );
+
+  const togglePropertyKeyframes = useCallback(
+    (property: KeyframeProperty, label: string, clipOverride?: TimelineClipData | null) => {
+      const targetClip = clipOverride ?? selectedClip;
+      if (!targetClip) return;
+      const linkedScaleProperties: KeyframeProperty[] =
+        linkScale && (property === 'transform.scaleX' || property === 'transform.scaleY')
+          ? ['transform.scaleX', 'transform.scaleY']
+          : [property];
+
+      const keyframesByProperty = linkedScaleProperties.map((item) => ({
+        property: item,
+        keyframes: getClipPropertyKeyframes(targetClip, item),
+      }));
+      const hasAnyKeyframes = keyframesByProperty.some((item) => item.keyframes.length > 0);
+
+      if (!hasAnyKeyframes) {
+        for (const item of linkedScaleProperties) {
+          addOrUpdatePropertyKeyframe(item, targetClip);
+        }
+        return;
+      }
+
+      const promptLabel =
+        linkedScaleProperties.length === 2 ? 'Width/Height' : label;
+      const shouldClear = window.confirm(
+        `Delete all ${promptLabel} keyframes on this clip? This cannot be undone with one click.`,
+      );
+      if (!shouldClear) return;
+
+      for (const item of keyframesByProperty) {
+        for (const keyframe of item.keyframes) {
+          void removeClipKeyframe(targetClip.id, keyframe.id);
+        }
+      }
+    },
+    [
+      selectedClip,
+      getClipPropertyKeyframes,
+      addOrUpdatePropertyKeyframe,
+      removeClipKeyframe,
+      linkScale,
+    ],
   );
 
   const addMask = useCallback(() => {
@@ -1151,10 +1843,9 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       ],
     };
     void addClipMask(selectedClip.id, mask);
-    setSelectedMaskId(id);
+    setActiveMaskSelection(selectedClip.id, id);
     setSelectedMaskKeyframeId(keyframeId);
-    setSelectedMaskPointIndex(0);
-  }, [selectedClip, clipMasks.length, clipLocalFrame, defaultMaskPoints, addClipMask]);
+  }, [selectedClip, clipMasks.length, clipLocalFrame, defaultMaskPoints, addClipMask, setActiveMaskSelection]);
 
   const removeSelectedMask = useCallback(() => {
     if (!selectedClip || !selectedMask) return;
@@ -1200,224 +1891,6 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     if (!selectedClip || !selectedMask || !selectedMaskKeyframe) return;
     void removeMaskShapeKeyframe(selectedClip.id, selectedMask.id, selectedMaskKeyframe.id);
   }, [selectedClip, selectedMask, selectedMaskKeyframe, removeMaskShapeKeyframe]);
-
-  const selectedMaskPoint = selectedMaskKeyframe?.points[selectedMaskPointIndex] ?? null;
-
-  const updateMaskPoint = useCallback(
-    (pointIndex: number, patch: Partial<MaskPoint>) => {
-      if (!selectedMaskKeyframe) return;
-      const points = cloneMaskPoints(selectedMaskKeyframe.points);
-      const current = points[pointIndex];
-      if (!current) return;
-      points[pointIndex] = {
-        x: patch.x ?? current.x,
-        y: patch.y ?? current.y,
-        inX: patch.inX ?? patch.x ?? current.inX,
-        inY: patch.inY ?? patch.y ?? current.inY,
-        outX: patch.outX ?? patch.x ?? current.outX,
-        outY: patch.outY ?? patch.y ?? current.outY,
-      };
-      upsertSelectedMaskKeyframe({
-        ...selectedMaskKeyframe,
-        points,
-      });
-    },
-    [selectedMaskKeyframe, cloneMaskPoints, upsertSelectedMaskKeyframe],
-  );
-
-  const smoothMaskPointHandles = useCallback(() => {
-    if (!selectedMaskKeyframe) return;
-    const points = cloneMaskPoints(selectedMaskKeyframe.points);
-    if (!points.length) return;
-    const idx = Math.max(0, Math.min(points.length - 1, selectedMaskPointIndex));
-    const current = points[idx];
-    if (!current) return;
-    const closed = selectedMask?.closed !== false;
-    const prev = closed
-      ? points[(idx - 1 + points.length) % points.length]
-      : points[Math.max(0, idx - 1)];
-    const next = closed ? points[(idx + 1) % points.length] : points[Math.min(points.length - 1, idx + 1)];
-    const tangentX = next.x - prev.x;
-    const tangentY = next.y - prev.y;
-    const tangentLength = Math.hypot(tangentX, tangentY);
-    if (tangentLength < 1e-5) {
-      current.inX = current.x;
-      current.inY = current.y;
-      current.outX = current.x;
-      current.outY = current.y;
-    } else {
-      const unitX = tangentX / tangentLength;
-      const unitY = tangentY / tangentLength;
-      const handleLength = Math.max(1, tangentLength / 6);
-      current.inX = current.x - unitX * handleLength;
-      current.inY = current.y - unitY * handleLength;
-      current.outX = current.x + unitX * handleLength;
-      current.outY = current.y + unitY * handleLength;
-    }
-    points[idx] = current;
-    upsertSelectedMaskKeyframe({
-      ...selectedMaskKeyframe,
-      points,
-    });
-  }, [selectedMaskKeyframe, selectedMaskPointIndex, cloneMaskPoints, upsertSelectedMaskKeyframe, selectedMask?.closed]);
-
-  const resetMaskPointHandles = useCallback(() => {
-    if (!selectedMaskPoint) return;
-    updateMaskPoint(selectedMaskPointIndex, {
-      inX: selectedMaskPoint.x,
-      inY: selectedMaskPoint.y,
-      outX: selectedMaskPoint.x,
-      outY: selectedMaskPoint.y,
-    });
-  }, [selectedMaskPoint, selectedMaskPointIndex, updateMaskPoint]);
-
-  const transformSelectedMaskShape = useCallback(
-    (options: {
-      translateX?: number;
-      translateY?: number;
-      scaleX?: number;
-      scaleY?: number;
-      rotateDeg?: number;
-    }) => {
-      if (!selectedMaskKeyframe) return;
-      if (!selectedMaskKeyframe.points.length) return;
-      const points = cloneMaskPoints(selectedMaskKeyframe.points);
-      const pivot = points.reduce(
-        (acc, pt) => ({ x: acc.x + pt.x, y: acc.y + pt.y }),
-        { x: 0, y: 0 },
-      );
-      const pivotX = pivot.x / points.length;
-      const pivotY = pivot.y / points.length;
-      const translateX = options.translateX ?? 0;
-      const translateY = options.translateY ?? 0;
-      const scaleX = options.scaleX ?? 1;
-      const scaleY = options.scaleY ?? 1;
-      const rotateRad = ((options.rotateDeg ?? 0) * Math.PI) / 180;
-      const cos = Math.cos(rotateRad);
-      const sin = Math.sin(rotateRad);
-
-      const transformCoord = (x: number, y: number): { x: number; y: number } => {
-        const localX = (x - pivotX) * scaleX;
-        const localY = (y - pivotY) * scaleY;
-        const rotX = localX * cos - localY * sin;
-        const rotY = localX * sin + localY * cos;
-        return {
-          x: pivotX + rotX + translateX,
-          y: pivotY + rotY + translateY,
-        };
-      };
-
-      const transformed = points.map((pt) => {
-        const p = transformCoord(pt.x, pt.y);
-        const inP = transformCoord(pt.inX, pt.inY);
-        const outP = transformCoord(pt.outX, pt.outY);
-        return {
-          x: p.x,
-          y: p.y,
-          inX: inP.x,
-          inY: inP.y,
-          outX: outP.x,
-          outY: outP.y,
-        };
-      });
-
-      upsertSelectedMaskKeyframe({
-        ...selectedMaskKeyframe,
-        points: transformed,
-      });
-    },
-    [selectedMaskKeyframe, cloneMaskPoints, upsertSelectedMaskKeyframe],
-  );
-
-  const applyMaskTransform = useCallback(() => {
-    const rawScale = maskScalePct / 100;
-    const safeScale = Math.abs(rawScale) < 0.001 ? (rawScale < 0 ? -0.001 : 0.001) : rawScale;
-    transformSelectedMaskShape({
-      translateX: maskMoveX,
-      translateY: maskMoveY,
-      scaleX: safeScale,
-      scaleY: safeScale,
-      rotateDeg: maskRotateDeg,
-    });
-    setMaskMoveX(0);
-    setMaskMoveY(0);
-    setMaskScalePct(100);
-    setMaskRotateDeg(0);
-  }, [maskMoveX, maskMoveY, maskScalePct, maskRotateDeg, transformSelectedMaskShape]);
-
-  const resetMaskTransformInputs = useCallback(() => {
-    setMaskMoveX(0);
-    setMaskMoveY(0);
-    setMaskScalePct(100);
-    setMaskRotateDeg(0);
-  }, []);
-
-  const nudgeMaskShape = useCallback(
-    (dx: number, dy: number) => {
-      transformSelectedMaskShape({ translateX: dx, translateY: dy });
-    },
-    [transformSelectedMaskShape],
-  );
-
-  const addMaskPoint = useCallback(() => {
-    if (!selectedMaskKeyframe) {
-      addMaskKeyframeAtPlayhead();
-      return;
-    }
-    if (!selectedClip || !selectedMask) return;
-    const points = cloneMaskPoints(selectedMaskKeyframe.points);
-    if (points.length === 0) {
-      const defaults = defaultMaskPoints();
-      upsertSelectedMaskKeyframe({
-        ...selectedMaskKeyframe,
-        points: defaults,
-      });
-      setSelectedMaskPointIndex(0);
-      return;
-    }
-    const idx = Math.max(0, Math.min(points.length - 1, selectedMaskPointIndex));
-    const nextIdx = (idx + 1) % points.length;
-    const a = points[idx];
-    const b = points[nextIdx];
-    const mid: MaskPoint = {
-      x: (a.x + b.x) / 2,
-      y: (a.y + b.y) / 2,
-      inX: (a.x + b.x) / 2,
-      inY: (a.y + b.y) / 2,
-      outX: (a.x + b.x) / 2,
-      outY: (a.y + b.y) / 2,
-    };
-    void insertMaskPointAcrossKeyframes(selectedClip.id, selectedMask.id, {
-      frame: selectedMaskKeyframe.frame,
-      insertAt: nextIdx,
-      point: mid,
-    });
-    setSelectedMaskPointIndex(nextIdx);
-  }, [
-    selectedMaskKeyframe,
-    selectedClip,
-    selectedMask,
-    selectedMaskPointIndex,
-    cloneMaskPoints,
-    defaultMaskPoints,
-    addMaskKeyframeAtPlayhead,
-    insertMaskPointAcrossKeyframes,
-    upsertSelectedMaskKeyframe,
-  ]);
-
-  const removeMaskPoint = useCallback(() => {
-    if (!selectedMaskKeyframe || !selectedClip || !selectedMask) return;
-    if (selectedMaskKeyframe.points.length <= 2) return;
-    const idx = Math.max(0, Math.min(selectedMaskKeyframe.points.length - 1, selectedMaskPointIndex));
-    void removeMaskPointAcrossKeyframes(selectedClip.id, selectedMask.id, idx);
-    setSelectedMaskPointIndex(Math.max(0, Math.min(idx, selectedMaskKeyframe.points.length - 2)));
-  }, [
-    selectedMaskKeyframe,
-    selectedClip,
-    selectedMask,
-    selectedMaskPointIndex,
-    removeMaskPointAcrossKeyframes,
-  ]);
 
   const jumpMaskKeyframe = useCallback(
     (direction: -1 | 1) => {
@@ -1499,6 +1972,65 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
 
   const speedLabel = useMemo(() => `${(speed * 100).toFixed(0)}%`, [speed]);
 
+  const renderInlineKeyframeControls = useCallback(
+    (property: KeyframeProperty, label: string, clipOverride?: TimelineClipData | null) => {
+      const targetClip = clipOverride ?? selectedClip;
+      if (!targetClip) return undefined;
+      const hasKeyframes = getClipPropertyKeyframes(targetClip, property).length > 0;
+      const localFrame = getClipLocalFrame(targetClip);
+      return {
+        left: (
+          <IconActionButton
+            title={
+              hasKeyframes
+                ? `Disable ${label} keyframes (with confirmation)`
+                : `Enable ${label} keyframes and add keyframe at playhead`
+            }
+            onClick={() => togglePropertyKeyframes(property, label, targetClip)}
+            active={hasKeyframes}
+          >
+            <ClockGlyph />
+          </IconActionButton>
+        ),
+        right: (
+          <>
+            <IconActionButton
+              title={`Previous ${label} keyframe`}
+              onClick={() => jumpPropertyKeyframe(property, -1, targetClip)}
+              disabled={!hasKeyframes}
+            >
+              <PrevGlyph />
+            </IconActionButton>
+            <span className="rounded bg-zinc-900/60 px-1 py-0.5 font-mono text-[10px] text-zinc-500">
+              {Math.max(0, Math.round(localFrame))}f
+            </span>
+            <IconActionButton
+              title={`Add/update ${label} keyframe at playhead`}
+              onClick={() => addOrUpdatePropertyKeyframe(property, targetClip)}
+            >
+              <AddKeyGlyph />
+            </IconActionButton>
+            <IconActionButton
+              title={`Next ${label} keyframe`}
+              onClick={() => jumpPropertyKeyframe(property, 1, targetClip)}
+              disabled={!hasKeyframes}
+            >
+              <NextGlyph />
+            </IconActionButton>
+          </>
+        ),
+      } satisfies SliderRailControls;
+    },
+    [
+      addOrUpdatePropertyKeyframe,
+      getClipLocalFrame,
+      getClipPropertyKeyframes,
+      jumpPropertyKeyframe,
+      selectedClip,
+      togglePropertyKeyframes,
+    ],
+  );
+
   return (
     <aside
       className="flex w-[24rem] flex-shrink-0 flex-col overflow-y-auto border-l border-zinc-700 bg-zinc-800/50 text-zinc-300"
@@ -1570,12 +2102,26 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 >
                   ⇵
                 </button>
+                
                 <button
                   className="rounded bg-emerald-700/70 px-2 py-1 text-xs text-white hover:bg-emerald-600"
                   onClick={fitToFrame}
                   title="Fit clip to frame"
                 >
-                  ⤢
+                  Fit
+                </button>
+                <button
+                  className={`rounded px-2 py-1 text-[11px] ${
+                    autoKeyframeEnabled
+                      ? 'bg-emerald-700/80 text-white hover:bg-emerald-600'
+                      : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                  }`}
+                  onClick={() =>
+                    useSelectionStore.getState().setAutoKeyframeEnabled(!autoKeyframeEnabled)
+                  }
+                  title="Auto-create keyframes while changing animated properties"
+                >
+                  {autoKeyframeEnabled ? 'AutoKey On' : 'AutoKey'}
                 </button>
               </div>
 
@@ -1587,6 +2133,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('positionX', v)}
                 format={(v) => `${Math.round(v)} px`}
+                sliderControls={renderInlineKeyframeControls('transform.positionX', 'Position X')}
               />
               <SliderNumberField
                 label="Position Y"
@@ -1596,12 +2143,13 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('positionY', v)}
                 format={(v) => `${Math.round(v)} px`}
+                sliderControls={renderInlineKeyframeControls('transform.positionY', 'Position Y')}
               />
               <div className="flex items-center justify-end gap-2 text-[11px] text-zinc-500">
                 <span>Link W/H</span>
                 <button
                   className={`rounded px-2 py-1 text-xs ${linkScale ? 'bg-blue-600/70 text-white' : 'bg-zinc-700 text-zinc-300'}`}
-                  onClick={() => setLinkScale((v) => !v)}
+                  onClick={() => setLinkScale(!linkScale)}
                   title={linkScale ? 'Unlink width and height' : 'Link width and height'}
                 >
                   {linkScale ? 'Linked' : 'Unlinked'}
@@ -1615,6 +2163,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={updateWidth}
                 format={(v) => `${Math.round(v)} px`}
+                sliderControls={renderInlineKeyframeControls('transform.scaleX', 'Width')}
               />
               <SliderNumberField
                 label="Height"
@@ -1624,6 +2173,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={updateHeight}
                 format={(v) => `${Math.round(v)} px`}
+                sliderControls={renderInlineKeyframeControls('transform.scaleY', 'Height')}
               />
               <SliderNumberField
                 label="Rotation"
@@ -1633,6 +2183,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('rotation', v)}
                 format={(v) => `${Math.round(v)} deg`}
+                sliderControls={renderInlineKeyframeControls('transform.rotation', 'Rotation')}
               />
               <SliderNumberField
                 label="Opacity"
@@ -1642,6 +2193,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('opacity', Math.max(0, Math.min(1, v / 100)))}
                 format={(v) => `${Math.round(v)}%`}
+                sliderControls={renderInlineKeyframeControls('opacity', 'Opacity')}
               />
             </CollapsibleSection>
           )}
@@ -1694,6 +2246,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={0.01}
                 onChange={(v) => updateProp('speed', (speed < 0 ? -1 : 1) * v)}
                 format={(v) => `${(v * 100).toFixed(0)}%`}
+                sliderControls={renderInlineKeyframeControls('speed', 'Speed')}
               />
             </CollapsibleSection>
           )}
@@ -1729,6 +2282,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('brightness', v / 100)}
                 format={(v) => `${Math.round(v)}%`}
+                sliderControls={renderInlineKeyframeControls('brightness', 'Brightness')}
               />
               <SliderNumberField
                 label="Contrast"
@@ -1738,6 +2292,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('contrast', v / 100)}
                 format={(v) => `${Math.round(v)}%`}
+                sliderControls={renderInlineKeyframeControls('contrast', 'Contrast')}
               />
               <SliderNumberField
                 label="Saturation"
@@ -1747,6 +2302,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('saturation', v / 100)}
                 format={(v) => `${Math.round(v)}%`}
+                sliderControls={renderInlineKeyframeControls('saturation', 'Saturation')}
               />
               <SliderNumberField
                 label="Hue"
@@ -1756,6 +2312,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 step={1}
                 onChange={(v) => updateProp('hue', v)}
                 format={(v) => `${Math.round(v)} deg`}
+                sliderControls={renderInlineKeyframeControls('hue', 'Hue')}
               />
               <SliderNumberField
                 label="Vignette"
@@ -1767,6 +2324,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 format={(v) =>
                   v === 0 ? 'None' : `${Math.round(Math.abs(v))}% ${v > 0 ? 'Dark' : 'Bright'}`
                 }
+                sliderControls={renderInlineKeyframeControls('vignette', 'Vignette')}
               />
             </CollapsibleSection>
           )}
@@ -1904,227 +2462,40 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
 
           {isVisualClip && (
             <CollapsibleSection
-              title="Keyframes"
-              open={keyframesOpen}
-              onToggle={() => setKeyframesOpen((v) => !v)}
-            >
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <select
-                    value={kfProperty}
-                    onChange={(e) =>
-                      setKfProperty(e.target.value as KeyframeProperty)
-                    }
-                    className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200"
-                  >
-                    {KEYFRAME_PROPERTIES.map((p) => (
-                      <option key={p.value} value={p.value}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={graphSnapStep}
-                    onChange={(e) => setGraphSnapStep(Math.max(1, Number(e.target.value) || 1))}
-                    className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-300"
-                    title="Graph drag snap in frames"
-                  >
-                    <option value={1}>Snap 1f</option>
-                    <option value={2}>Snap 2f</option>
-                    <option value={5}>Snap 5f</option>
-                    <option value={10}>Snap 10f</option>
-                  </select>
-                  <button
-                    className="rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500"
-                    onClick={addKeyframeAtPlayhead}
-                    title="Add/update keyframe at current playhead"
-                  >
-                    Add @ {clipLocalFrame}f
-                  </button>
-                  <button
-                    className={`rounded px-2 py-1 text-[11px] ${
-                      autoKeyframeEnabled
-                        ? 'bg-emerald-700/80 text-white hover:bg-emerald-600'
-                        : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
-                    }`}
-                    onClick={() => setAutoKeyframeEnabled(!autoKeyframeEnabled)}
-                    title="Auto-create keyframes while changing transform/opacity"
-                  >
-                    {autoKeyframeEnabled ? 'AutoKey On' : 'AutoKey'}
-                  </button>
-                </div>
-
-                <KeyframeMiniGraph
-                  keyframes={selectedPropertyKeyframes}
-                  clipDuration={Math.max(1, selectedClip.durationFrames)}
-                  property={kfProperty}
-                  currentFrame={clipLocalFrame}
-                  snapStep={graphSnapStep}
-                  onCommit={(keyframeId, patch) => updateSelectedKeyframe(keyframeId, patch)}
-                />
-                <div className="text-[10px] text-zinc-500">
-                  Wheel: zoom graph, Shift+Wheel: pan, Double-click: fit full clip.
-                </div>
-
-                <div className="max-h-36 space-y-1 overflow-y-auto rounded border border-zinc-700 bg-zinc-900/40 p-1">
-                  {selectedPropertyKeyframes.length === 0 && (
-                    <div className="px-1 py-0.5 text-[10px] text-zinc-500">No keyframes yet</div>
-                  )}
-                  {selectedPropertyKeyframes.map((kf) => {
-                    const handles = kf.bezierHandles ?? defaultBezierHandles();
-                    return (
-                      <div key={kf.id} className="rounded border border-zinc-700/60 bg-zinc-900/20 p-1">
-                        <div className="grid grid-cols-[62px_1fr_92px_52px] items-center gap-1 text-[11px]">
-                          <input
-                            type="number"
-                            value={kf.frame}
-                            min={0}
-                            step={1}
-                            onChange={(e) => {
-                              const next = Number(e.target.value);
-                              if (!Number.isFinite(next)) return;
-                              updateSelectedKeyframe(kf.id, { frame: next });
-                            }}
-                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
-                            title="Frame"
-                          />
-                          <input
-                            type="number"
-                            value={Number.isFinite(kf.value) ? kf.value : 0}
-                            step={0.01}
-                            onChange={(e) => {
-                              const next = Number(e.target.value);
-                              if (!Number.isFinite(next)) return;
-                              updateSelectedKeyframe(kf.id, { value: next });
-                            }}
-                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 font-mono text-zinc-300"
-                            title="Value"
-                          />
-                          <select
-                            value={kf.easing}
-                            onChange={(e) => {
-                              const easing =
-                                e.target.value as NonNullable<TimelineClipData['keyframes']>[number]['easing'];
-                              updateSelectedKeyframe(kf.id, {
-                                easing,
-                                bezierHandles:
-                                  easing === 'bezier'
-                                    ? kf.bezierHandles ?? defaultBezierHandles()
-                                    : kf.bezierHandles,
-                              });
-                            }}
-                            className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-zinc-300"
-                            title="Easing"
-                          >
-                            <option value="linear">Linear</option>
-                            <option value="ease-in">Ease In</option>
-                            <option value="ease-out">Ease Out</option>
-                            <option value="ease-in-out">Ease In/Out</option>
-                            <option value="bezier">Bezier</option>
-                          </select>
-                          <button
-                            className="rounded px-1 text-[10px] text-zinc-500 hover:bg-zinc-700 hover:text-red-300"
-                            onClick={() => void removeClipKeyframe(selectedClip.id, kf.id)}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                        {kf.easing === 'bezier' && (
-                          <div className="mt-1 grid grid-cols-4 gap-1">
-                            <input
-                              type="number"
-                              value={handles.outX}
-                              step={0.01}
-                              min={0}
-                              max={1}
-                              title="Out X"
-                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
-                              onChange={(e) => {
-                                const v = Number(e.target.value);
-                                if (!Number.isFinite(v)) return;
-                                updateSelectedKeyframe(kf.id, {
-                                  bezierHandles: { ...handles, outX: clamp01(v) },
-                                });
-                              }}
-                            />
-                            <input
-                              type="number"
-                              value={handles.outY}
-                              step={0.01}
-                              min={0}
-                              max={1}
-                              title="Out Y"
-                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
-                              onChange={(e) => {
-                                const v = Number(e.target.value);
-                                if (!Number.isFinite(v)) return;
-                                updateSelectedKeyframe(kf.id, {
-                                  bezierHandles: { ...handles, outY: clamp01(v) },
-                                });
-                              }}
-                            />
-                            <input
-                              type="number"
-                              value={handles.inX}
-                              step={0.01}
-                              min={0}
-                              max={1}
-                              title="In X"
-                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
-                              onChange={(e) => {
-                                const v = Number(e.target.value);
-                                if (!Number.isFinite(v)) return;
-                                updateSelectedKeyframe(kf.id, {
-                                  bezierHandles: { ...handles, inX: clamp01(v) },
-                                });
-                              }}
-                            />
-                            <input
-                              type="number"
-                              value={handles.inY}
-                              step={0.01}
-                              min={0}
-                              max={1}
-                              title="In Y"
-                              className="rounded border border-zinc-700 bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-300"
-                              onChange={(e) => {
-                                const v = Number(e.target.value);
-                                if (!Number.isFinite(v)) return;
-                                updateSelectedKeyframe(kf.id, {
-                                  bezierHandles: { ...handles, inY: clamp01(v) },
-                                });
-                              }}
-                            />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </CollapsibleSection>
-          )}
-
-          {isVisualClip && (
-            <CollapsibleSection
               title="Masks"
               open={masksOpen}
               onToggle={() => setMasksOpen((v) => !v)}
             >
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <select
-                    value={selectedMask?.id ?? ''}
-                    onChange={(e) => setSelectedMaskId(e.target.value || null)}
-                    className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200"
-                  >
-                    {clipMasks.length === 0 && <option value="">No masks</option>}
-                    {clipMasks.map((mask) => (
-                      <option key={mask.id} value={mask.id}>
-                        {mask.name}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex min-w-0 flex-1 flex-wrap gap-1">
+                    {clipMasks.length === 0 && (
+                      <div className="rounded border border-zinc-700 bg-zinc-900/40 px-2 py-1 text-[10px] text-zinc-500">
+                        No masks
+                      </div>
+                    )}
+                    {clipMasks.map((mask, index) => {
+                      const isActive = selectedMask?.id === mask.id;
+                      return (
+                        <button
+                          key={mask.id}
+                          className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] ${
+                            isActive
+                              ? 'border-cyan-400/70 bg-cyan-500/15 text-cyan-100'
+                              : 'border-zinc-700 bg-zinc-900/40 text-zinc-300 hover:bg-zinc-800'
+                          }`}
+                          onClick={() => selectedClip && setActiveMaskSelection(selectedClip.id, mask.id)}
+                          title={`Select ${mask.name}`}
+                        >
+                          <span
+                            className="h-2 w-2 rounded-full"
+                            style={{ backgroundColor: MASK_CHIP_COLORS[index % MASK_CHIP_COLORS.length] ?? '#22d3ee' }}
+                          />
+                          <span className="truncate">{mask.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
                   <button
                     className="rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500"
                     onClick={addMask}
@@ -2194,8 +2565,21 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                       min={0}
                       max={100}
                       step={1}
-                      onChange={(v) => updateSelectedMask({ opacity: clamp01(v / 100) })}
+                      onChange={(v) => {
+                        if (!selectedClip) return;
+                        const next = clamp01(v / 100);
+                        updateSelectedMask({ opacity: next });
+                        const hasClockedKeyframes =
+                          getClipPropertyKeyframes(selectedClip, 'mask.opacity').length > 0;
+                        upsertPropertyKeyframeValue(
+                          selectedClip,
+                          'mask.opacity',
+                          next,
+                          hasClockedKeyframes,
+                        );
+                      }}
                       format={(v) => `${Math.round(v)}%`}
+                      sliderControls={renderInlineKeyframeControls('mask.opacity', 'Mask Opacity')}
                     />
                     <SliderNumberField
                       label="Feather"
@@ -2203,8 +2587,21 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                       min={0}
                       max={300}
                       step={1}
-                      onChange={(v) => updateSelectedMask({ feather: Math.max(0, v) })}
+                      onChange={(v) => {
+                        if (!selectedClip) return;
+                        const next = Math.max(0, v);
+                        updateSelectedMask({ feather: next });
+                        const hasClockedKeyframes =
+                          getClipPropertyKeyframes(selectedClip, 'mask.feather').length > 0;
+                        upsertPropertyKeyframeValue(
+                          selectedClip,
+                          'mask.feather',
+                          next,
+                          hasClockedKeyframes,
+                        );
+                      }}
                       format={(v) => `${Math.round(v)} px`}
+                      sliderControls={renderInlineKeyframeControls('mask.feather', 'Mask Feather')}
                     />
                     <SliderNumberField
                       label="Expansion"
@@ -2212,291 +2609,61 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                       min={-200}
                       max={200}
                       step={1}
-                      onChange={(v) => updateSelectedMask({ expansion: v })}
+                      onChange={(v) => {
+                        if (!selectedClip) return;
+                        updateSelectedMask({ expansion: v });
+                        const hasClockedKeyframes =
+                          getClipPropertyKeyframes(selectedClip, 'mask.expansion').length > 0;
+                        upsertPropertyKeyframeValue(
+                          selectedClip,
+                          'mask.expansion',
+                          v,
+                          hasClockedKeyframes,
+                        );
+                      }}
                       format={(v) => `${Math.round(v)} px`}
+                      sliderControls={renderInlineKeyframeControls('mask.expansion', 'Mask Expansion')}
                     />
 
                     <div className="rounded border border-zinc-700 bg-zinc-900/30 p-2">
                       <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
-                        <span>Shape Transform</span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => nudgeMaskShape(-1, 0)}
-                            title="Nudge left by 1px"
-                          >
-                            L
-                          </button>
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => nudgeMaskShape(1, 0)}
-                            title="Nudge right by 1px"
-                          >
-                            R
-                          </button>
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => nudgeMaskShape(0, -1)}
-                            title="Nudge up by 1px"
-                          >
-                            U
-                          </button>
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => nudgeMaskShape(0, 1)}
-                            title="Nudge down by 1px"
-                          >
-                            D
-                          </button>
-                        </div>
+                        <span>Mask Shape</span>
+                        <span className="font-mono text-[10px] text-zinc-500">
+                          {selectedMaskKeyframes.length} kf / {selectedMaskKeyframe?.points.length ?? 0} pts
+                        </span>
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <SliderNumberField
-                          label="Move X"
-                          value={maskMoveX}
-                          min={-1000}
-                          max={1000}
-                          step={1}
-                          onChange={setMaskMoveX}
-                          format={(v) => `${Math.round(v)} px`}
-                        />
-                        <SliderNumberField
-                          label="Move Y"
-                          value={maskMoveY}
-                          min={-1000}
-                          max={1000}
-                          step={1}
-                          onChange={setMaskMoveY}
-                          format={(v) => `${Math.round(v)} px`}
-                        />
+                      <InlineKeyframeControls
+                        active={selectedMaskKeyframes.length > 0}
+                        label={`${selectedMask.name} shape`}
+                        currentFrame={clipLocalFrame}
+                        onToggle={() => {
+                          if (!selectedClip) return;
+                          if (selectedMaskKeyframes.length === 0) {
+                            addMaskKeyframeAtPlayhead();
+                            return;
+                          }
+                          const shouldClear = window.confirm(
+                            `Delete all ${selectedMask.name} shape keyframes on this clip?`,
+                          );
+                          if (!shouldClear) return;
+                          for (const keyframe of selectedMaskKeyframes) {
+                            void removeMaskShapeKeyframe(selectedClip.id, selectedMask.id, keyframe.id);
+                          }
+                        }}
+                        onPrev={() => jumpMaskKeyframe(-1)}
+                        onAdd={addMaskKeyframeAtPlayhead}
+                        onNext={() => jumpMaskKeyframe(1)}
+                        onClear={() => {
+                          if (!selectedClip || !selectedMaskKeyframe) return;
+                          removeSelectedMaskKeyframe();
+                        }}
+                        disableNav={selectedMaskKeyframes.length === 0}
+                        disableAdd={!selectedClip}
+                        disableClear={!selectedMaskKeyframe}
+                      />
+                      <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/50 px-2 py-1.5 text-[10px] text-zinc-500">
+                        Shape, point type, position, scale and rotation are edited directly in Program.
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <SliderNumberField
-                          label="Scale"
-                          value={maskScalePct}
-                          min={1}
-                          max={400}
-                          step={1}
-                          onChange={setMaskScalePct}
-                          format={(v) => `${Math.round(v)}%`}
-                        />
-                        <SliderNumberField
-                          label="Rotate"
-                          value={maskRotateDeg}
-                          min={-180}
-                          max={180}
-                          step={1}
-                          onChange={setMaskRotateDeg}
-                          format={(v) => `${Math.round(v)} deg`}
-                        />
-                      </div>
-                      <div className="mt-1 flex items-center gap-1">
-                        <button
-                          className="rounded bg-blue-600/80 px-2 py-1 text-[11px] text-white hover:bg-blue-500 disabled:opacity-40"
-                          onClick={applyMaskTransform}
-                          disabled={!selectedMaskKeyframe}
-                        >
-                          Apply
-                        </button>
-                        <button
-                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
-                          onClick={resetMaskTransformInputs}
-                        >
-                          Clear
-                        </button>
-                        <button
-                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
-                          onClick={() => transformSelectedMaskShape({ scaleX: 1.05, scaleY: 1.05 })}
-                          disabled={!selectedMaskKeyframe}
-                          title="Scale selected mask up by 5%"
-                        >
-                          Scale +
-                        </button>
-                        <button
-                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
-                          onClick={() => transformSelectedMaskShape({ scaleX: 1 / 1.05, scaleY: 1 / 1.05 })}
-                          disabled={!selectedMaskKeyframe}
-                          title="Scale selected mask down by 5%"
-                        >
-                          Scale -
-                        </button>
-                        <button
-                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
-                          onClick={() => transformSelectedMaskShape({ rotateDeg: -5 })}
-                          disabled={!selectedMaskKeyframe}
-                          title="Rotate selected mask by -5 deg"
-                        >
-                          Rot -
-                        </button>
-                        <button
-                          className="rounded bg-zinc-700 px-2 py-1 text-[11px] text-zinc-200 hover:bg-zinc-600"
-                          onClick={() => transformSelectedMaskShape({ rotateDeg: 5 })}
-                          disabled={!selectedMaskKeyframe}
-                          title="Rotate selected mask by +5 deg"
-                        >
-                          Rot +
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="rounded border border-zinc-700 bg-zinc-900/30 p-2">
-                      <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
-                        <span>Shape Keyframes</span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => jumpMaskKeyframe(-1)}
-                            title="Previous keyframe"
-                          >
-                            Prev
-                          </button>
-                          <button
-                            className="rounded bg-blue-600/80 px-1.5 py-0.5 text-white hover:bg-blue-500"
-                            onClick={addMaskKeyframeAtPlayhead}
-                            title="Add or update keyframe at playhead"
-                          >
-                            Add @{clipLocalFrame}f
-                          </button>
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600 disabled:opacity-40"
-                            disabled={!selectedMaskKeyframe}
-                            onClick={removeSelectedMaskKeyframe}
-                            title="Remove selected keyframe"
-                          >
-                            Del
-                          </button>
-                          <button
-                            className="rounded bg-zinc-700 px-1.5 py-0.5 hover:bg-zinc-600"
-                            onClick={() => jumpMaskKeyframe(1)}
-                            title="Next keyframe"
-                          >
-                            Next
-                          </button>
-                        </div>
-                      </div>
-
-                      <select
-                        value={selectedMaskKeyframe?.id ?? ''}
-                        onChange={(e) => setSelectedMaskKeyframeId(e.target.value || null)}
-                        className="mb-2 w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200"
-                      >
-                        {selectedMaskKeyframes.length === 0 && <option value="">No keyframes</option>}
-                        {selectedMaskKeyframes.map((kf) => (
-                          <option key={kf.id} value={kf.id}>
-                            {kf.frame}f ({kf.points.length} pts)
-                          </option>
-                        ))}
-                      </select>
-
-                      {selectedMaskKeyframe && (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <select
-                              value={selectedMaskPointIndex}
-                              onChange={(e) => setSelectedMaskPointIndex(Number(e.target.value))}
-                              className="flex-1 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-[11px] text-zinc-200"
-                            >
-                              {selectedMaskKeyframe.points.map((_, idx) => (
-                                <option key={idx} value={idx}>
-                                  Point {idx + 1}
-                                </option>
-                              ))}
-                            </select>
-                            <button
-                              className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600"
-                              onClick={addMaskPoint}
-                            >
-                              +Pt
-                            </button>
-                            <button
-                              className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600 disabled:opacity-40"
-                              disabled={selectedMaskKeyframe.points.length <= 2}
-                              onClick={removeMaskPoint}
-                            >
-                              -Pt
-                            </button>
-                          </div>
-
-                          {selectedMaskPoint && (
-                            <div className="space-y-2">
-                              <div className="grid grid-cols-2 gap-2">
-                                <SliderNumberField
-                                  label="Point X"
-                                  value={selectedMaskPoint.x}
-                                  min={-baseWidth}
-                                  max={baseWidth * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { x: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                                <SliderNumberField
-                                  label="Point Y"
-                                  value={selectedMaskPoint.y}
-                                  min={-baseHeight}
-                                  max={baseHeight * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { y: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                <SliderNumberField
-                                  label="In X"
-                                  value={selectedMaskPoint.inX}
-                                  min={-baseWidth}
-                                  max={baseWidth * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { inX: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                                <SliderNumberField
-                                  label="In Y"
-                                  value={selectedMaskPoint.inY}
-                                  min={-baseHeight}
-                                  max={baseHeight * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { inY: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                <SliderNumberField
-                                  label="Out X"
-                                  value={selectedMaskPoint.outX}
-                                  min={-baseWidth}
-                                  max={baseWidth * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { outX: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                                <SliderNumberField
-                                  label="Out Y"
-                                  value={selectedMaskPoint.outY}
-                                  min={-baseHeight}
-                                  max={baseHeight * 2}
-                                  step={1}
-                                  onChange={(v) => updateMaskPoint(selectedMaskPointIndex, { outY: v })}
-                                  format={(v) => `${Math.round(v)} px`}
-                                />
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <button
-                                  className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600"
-                                  onClick={smoothMaskPointHandles}
-                                >
-                                  Smooth
-                                </button>
-                                <button
-                                  className="rounded bg-zinc-700 px-2 py-1 text-[11px] hover:bg-zinc-600"
-                                  onClick={resetMaskPointHandles}
-                                >
-                                  Corner
-                                </button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
                     </div>
                   </>
                 )}
@@ -2546,14 +2713,24 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 min={-60}
                 max={12}
                 step={0.5}
-                onChange={(v) =>
-                  updateClipProperties(audioControlClip.id, {
+                onChange={(v) => {
+                  const gain = Math.max(0, dbToGain(v));
+                  void updateClipProperties(audioControlClip.id, {
                     audioGainDb: v,
-                    gain: Math.max(0, dbToGain(v)),
-                    audioVolume: Math.max(0, dbToGain(v)),
-                  })
-                }
+                    gain,
+                    audioVolume: gain,
+                  });
+                  const hasClockedKeyframes =
+                    getClipPropertyKeyframes(audioControlClip, 'volume').length > 0;
+                  upsertPropertyKeyframeValue(
+                    audioControlClip,
+                    'volume',
+                    gain,
+                    hasClockedKeyframes,
+                  );
+                }}
                 format={(v) => (v <= -59.5 ? '-inf dB' : `${v.toFixed(1)} dB`)}
+                sliderControls={renderInlineKeyframeControls('volume', 'Volume', audioControlClip)}
               />
               <SliderNumberField
                 label="Pan"
@@ -2561,10 +2738,15 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 min={-100}
                 max={100}
                 step={1}
-                onChange={(v) =>
-                  updateClipProperties(audioControlClip.id, { pan: v / 100, audioPan: v / 100 })
-                }
+                onChange={(v) => {
+                  const pan = v / 100;
+                  void updateClipProperties(audioControlClip.id, { pan, audioPan: pan });
+                  const hasClockedKeyframes =
+                    getClipPropertyKeyframes(audioControlClip, 'pan').length > 0;
+                  upsertPropertyKeyframeValue(audioControlClip, 'pan', pan, hasClockedKeyframes);
+                }}
                 format={(v) => `${Math.round(v)}%`}
+                sliderControls={renderInlineKeyframeControls('pan', 'Pan', audioControlClip)}
               />
               <EqGraphic
                 values={{

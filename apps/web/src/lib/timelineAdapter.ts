@@ -155,6 +155,7 @@ function adaptClip(clip: TimelineClipData, trackId: string, rate: FrameRate): Cl
     volume: 1,
     pan: 0,
     audioEnvelope: [],
+    speed: clip.speed ?? 1,
 
     // Transform - use clip values with defaults
     transform: {
@@ -169,6 +170,11 @@ function adaptClip(clip: TimelineClipData, trackId: string, rate: FrameRate): Cl
 
     // Visual
     opacity: clip.opacity ?? 1,
+    brightness: clip.brightness ?? 1,
+    contrast: clip.contrast ?? 1,
+    saturation: clip.saturation ?? 1,
+    hue: clip.hue ?? 0,
+    vignette: clip.vignette ?? 0,
     blendMode: normalizeBlendMode(clip.blendMode),
     blendParams: {
       silhouetteGamma: (clip.blendParams as ClipBlendParams | undefined)?.silhouetteGamma ?? 1,

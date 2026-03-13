@@ -6,7 +6,7 @@
  * clip move (drag), clip trimming (edge drag), and playhead scrub.
  */
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
 import { usePlaybackStore } from '../stores/playbackStore.js';
 import { useSelectionStore } from '../stores/selectionStore.js';
@@ -15,6 +15,16 @@ import type { TimelineMarker } from '../stores/playbackStore.js';
 import type { TimelineKeyframeData } from '../stores/projectStore.js';
 import { api } from '../lib/api.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
+import {
+  AddKeyGlyph,
+  IconActionButton,
+  KeyframeMiniGraph,
+  KEYFRAME_PROPERTIES,
+  NextGlyph,
+  PrevGlyph,
+  TrashGlyph,
+} from './Inspector.js';
+import type { KeyframeProperty } from './Inspector.js';
 
 /** Accepted media file extensions for drop detection. */
 const MEDIA_EXTENSIONS = new Set([
@@ -80,10 +90,10 @@ interface TimelineTrack {
 interface TimelineClipKeyframe {
   id: string;
   frame: number;
-  property: string;
+  property: TimelineKeyframeData['property'];
   value: number;
-  easing?: 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out' | 'bezier';
-  bezierHandles?: { inX: number; inY: number; outX: number; outY: number };
+  easing: TimelineKeyframeData['easing'];
+  bezierHandles?: TimelineKeyframeData['bezierHandles'];
 }
 
 interface TimelineClip {
@@ -95,11 +105,23 @@ interface TimelineClip {
   mediaAssetId?: string | null;
   sourceInFrame?: number;
   sourceOutFrame?: number;
+  opacity?: number;
+  positionX?: number;
+  positionY?: number;
+  scaleX?: number;
+  scaleY?: number;
+  rotation?: number;
   speed?: number;
   gain?: number;
   pan?: number;
+  audioPan?: number;
   audioGainDb?: number;
   audioVolume?: number;
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  hue?: number;
+  vignette?: number;
   keyframes?: TimelineClipKeyframe[];
   blendMode?: string;
   transitionIn?: {
@@ -114,6 +136,11 @@ interface TimelineClip {
     durationFrames: number;
     audioCrossfade?: boolean;
   } | null;
+  masks?: Array<{
+    opacity?: number;
+    feather?: number;
+    expansion?: number;
+  }>;
   generator?: { kind: 'black-video' | 'color-matte' | 'adjustment-layer'; color?: string } | null;
 }
 
@@ -151,6 +178,17 @@ function normalizeTransitionType(type: string | undefined): 'cross-dissolve' | '
 }
 
 function keyframeColor(property: string): string {
+  if (property === 'speed') return '#14b8a6';
+  if (property === 'volume' || property === 'pan') return '#f43f5e';
+  if (
+    property === 'brightness' ||
+    property === 'contrast' ||
+    property === 'saturation' ||
+    property === 'hue' ||
+    property === 'vignette'
+  ) {
+    return '#f59e0b';
+  }
   if (property.startsWith('transform.position')) return '#f97316';
   if (property.startsWith('transform.scale')) return '#22c55e';
   if (property === 'transform.rotation') return '#eab308';
@@ -158,6 +196,95 @@ function keyframeColor(property: string): string {
   if (property.startsWith('mask.')) return '#22d3ee';
   if (property === 'opacity') return '#a78bfa';
   return '#93c5fd';
+}
+
+function CurveGlyph({
+  path,
+  fill = false,
+}: {
+  path: React.ReactNode;
+  fill?: boolean;
+}) {
+  return (
+    <svg viewBox="0 0 16 16" className={`h-3.5 w-3.5 ${fill ? 'fill-current' : 'fill-none stroke-current'}`}>
+      {path}
+    </svg>
+  );
+}
+
+function LinearGlyph() {
+  return (
+    <CurveGlyph
+      path={<path d="M3 11.5 13 4.5" strokeWidth="1.6" strokeLinecap="round" />}
+    />
+  );
+}
+
+function EaseInGlyph() {
+  return (
+    <CurveGlyph
+      path={<path d="M3 11.5c2.2 0 2.8-5.6 10-7" strokeWidth="1.6" strokeLinecap="round" />}
+    />
+  );
+}
+
+function EaseOutGlyph() {
+  return (
+    <CurveGlyph
+      path={<path d="M3 11.5c7.2-1.4 7.8-7 10-7" strokeWidth="1.6" strokeLinecap="round" />}
+    />
+  );
+}
+
+function EaseInOutGlyph() {
+  return (
+    <CurveGlyph
+      path={<path d="M3 11.5c2.6 0 2.4-7 5-7s2.4 7 5 7" strokeWidth="1.6" strokeLinecap="round" />}
+    />
+  );
+}
+
+function BezierGlyph() {
+  return (
+    <CurveGlyph
+      path={
+        <>
+          <path d="M3 11.5c2.5 0 2.5-7 5-7s2.5 7 5 7" strokeWidth="1.4" strokeLinecap="round" />
+          <circle cx="3" cy="11.5" r="1" fill="currentColor" stroke="none" />
+          <circle cx="8" cy="4.5" r="1" fill="currentColor" stroke="none" />
+          <circle cx="13" cy="11.5" r="1" fill="currentColor" stroke="none" />
+        </>
+      }
+    />
+  );
+}
+
+function CopyGlyph() {
+  return (
+    <CurveGlyph
+      fill
+      path={
+        <>
+          <rect x="5" y="3" width="7" height="9" rx="1.2" />
+          <path d="M4 5H3.5A1.5 1.5 0 0 0 2 6.5v6A1.5 1.5 0 0 0 3.5 14H9" strokeWidth="1.2" />
+        </>
+      }
+    />
+  );
+}
+
+function PasteGlyph() {
+  return (
+    <CurveGlyph
+      fill
+      path={
+        <>
+          <path d="M5 3.5h6A1.5 1.5 0 0 1 12.5 5v7A1.5 1.5 0 0 1 11 13.5H5A1.5 1.5 0 0 1 3.5 12V5A1.5 1.5 0 0 1 5 3.5Z" />
+          <path d="M6 2.5h4v2H6z" />
+        </>
+      }
+    />
+  );
 }
 
 /** Extract fps from first sequence metadata, default 30. */
@@ -220,6 +347,7 @@ export function Timeline() {
   const setClipTransition = useProjectStore((s) => s.setClipTransition);
   const splitClipAtPlayhead = useProjectStore((s) => s.splitClipAtPlayhead);
   const upsertClipKeyframe = useProjectStore((s) => s.upsertClipKeyframe);
+  const removeClipKeyframe = useProjectStore((s) => s.removeClipKeyframe);
   const updateTrack = useProjectStore((s) => s.updateTrack);
   const isTrackLocked = useProjectStore((s) => s.isTrackLocked);
   const unlinkSelectedClips = useProjectStore((s) => s.unlinkSelectedClips);
@@ -239,9 +367,12 @@ export function Timeline() {
   const timelineTool = useSelectionStore((s) => s.timelineTool);
   const rippleMode = useSelectionStore((s) => s.rippleMode);
   const linkedSelection = useSelectionStore((s) => s.linkedSelection);
+  const linkedScale = useSelectionStore((s) => s.linkedScale);
+  const autoKeyframeEnabled = useSelectionStore((s) => s.autoKeyframeEnabled);
   const setTimelineTool = useSelectionStore((s) => s.setTimelineTool);
   const setRippleMode = useSelectionStore((s) => s.setRippleMode);
   const setLinkedSelection = useSelectionStore((s) => s.setLinkedSelection);
+  const setAutoKeyframeEnabled = useSelectionStore((s) => s.setAutoKeyframeEnabled);
   const targetVideoTrackId = useSelectionStore((s) => s.targetVideoTrackId);
   const targetAudioTrackId = useSelectionStore((s) => s.targetAudioTrackId);
   const setTargetVideoTrackId = useSelectionStore((s) => s.setTargetVideoTrackId);
@@ -256,6 +387,16 @@ export function Timeline() {
   const setTimelineZoom = usePlaybackStore((s) => s.setTimelineZoom);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [isDragOverFiles, setIsDragOverFiles] = useState(false);
+  const [timelineViewMode, setTimelineViewMode] = useState<'timeline' | 'graph'>('timeline');
+  const [graphProperty, setGraphProperty] = useState<KeyframeProperty>('transform.positionX');
+  const [graphSnapStep, setGraphSnapStep] = useState(1);
+  const [selectedGraphKeyframeId, setSelectedGraphKeyframeId] = useState<string | null>(null);
+  const [selectedGraphKeyframeIds, setSelectedGraphKeyframeIds] = useState<string[]>([]);
+  const [graphKeyframeClipboard, setGraphKeyframeClipboard] = useState<{
+    property: KeyframeProperty;
+    items: Array<Pick<TimelineKeyframeData, 'value' | 'easing' | 'bezierHandles'> & { offsetFrame: number }>;
+  } | null>(null);
+  const [graphMarkerDraftFrames, setGraphMarkerDraftFrames] = useState<Record<string, number>>({});
   const [channelConfigTrackId, setChannelConfigTrackId] = useState<string | null>(null);
   const [firstClipPrompt, setFirstClipPrompt] = useState<{
     asset: ApiMediaAsset;
@@ -277,6 +418,20 @@ export function Timeline() {
   const [dragDelta, setDragDelta] = useState(0); // px offset during drag
   const keyframeDragRef = useRef<KeyframeDragState | null>(null);
   const [keyframeDragFrame, setKeyframeDragFrame] = useState<number | null>(null);
+  const graphEditorRef = useRef<HTMLDivElement | null>(null);
+  const graphScrubRef = useRef<HTMLDivElement | null>(null);
+  const graphOverviewRef = useRef<HTMLDivElement | null>(null);
+  const graphMarkerDragRef = useRef<{
+    clipId: string;
+    property: KeyframeProperty;
+    container: HTMLDivElement;
+    anchorClientX: number;
+    selectedIds: string[];
+    startFrames: Record<string, number>;
+    minDelta: number;
+    maxDelta: number;
+  } | null>(null);
+  const pendingGraphSelectionRef = useRef<{ ids: string[]; primaryId: string | null } | null>(null);
 
   // Snap line state (null = no snap line visible)
   const [snapLineFrame, setSnapLineFrame] = useState<number | null>(null);
@@ -350,6 +505,782 @@ export function Timeline() {
     const data = sequences[0]?.data as { tracks?: TimelineTrack[] } | undefined;
     return data?.tracks ?? [];
   })();
+
+  const selectedGraphClip = useMemo((): TimelineClip | null => {
+    if (selectedClipIds.size !== 1) return null;
+    const selectedId = Array.from(selectedClipIds)[0];
+    for (const track of tracks) {
+      const clip = track.clips.find((item) => item.id === selectedId);
+      if (clip) return clip;
+    }
+    return null;
+  }, [selectedClipIds, tracks]);
+
+  const timelineGraphEndFrame = useMemo(() => {
+    let maxFrame = 0;
+    for (const track of tracks) {
+      for (const clip of track.clips) {
+        maxFrame = Math.max(maxFrame, clip.startFrame + clip.durationFrames);
+      }
+    }
+    return Math.max(1, maxFrame, currentFrame + 1);
+  }, [tracks, currentFrame]);
+
+  const graphKeyframesByProperty = useMemo(() => {
+    const map = new Map<KeyframeProperty, TimelineClipKeyframe[]>();
+    for (const item of KEYFRAME_PROPERTIES) {
+      map.set(item.value, []);
+    }
+    const source = [...(selectedGraphClip?.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
+    for (const keyframe of source) {
+      const bucket = map.get(keyframe.property as KeyframeProperty);
+      if (bucket) {
+        bucket.push(keyframe);
+      }
+    }
+    return map;
+  }, [selectedGraphClip?.keyframes]);
+
+  const graphPropertiesWithKeyframes = useMemo(
+    () =>
+      KEYFRAME_PROPERTIES.filter(
+        (item) => (graphKeyframesByProperty.get(item.value)?.length ?? 0) > 0,
+      ),
+    [graphKeyframesByProperty],
+  );
+
+  useEffect(() => {
+    if (!selectedGraphClip) return;
+    const hasGraphProperty = (graphKeyframesByProperty.get(graphProperty)?.length ?? 0) > 0;
+    if (hasGraphProperty || graphPropertiesWithKeyframes.length === 0) return;
+    setGraphProperty(graphPropertiesWithKeyframes[0].value);
+  }, [selectedGraphClip, graphProperty, graphKeyframesByProperty, graphPropertiesWithKeyframes]);
+
+  const graphPropertyKeyframes = graphKeyframesByProperty.get(graphProperty) ?? [];
+  const graphClipEndFrame = useMemo(
+    () => (selectedGraphClip ? selectedGraphClip.startFrame + selectedGraphClip.durationFrames : 0),
+    [selectedGraphClip],
+  );
+
+  const graphPropertyTimelineKeyframes = useMemo(() => {
+    if (!selectedGraphClip) return [];
+    return graphPropertyKeyframes.map((kf) => ({
+      ...kf,
+      frame: selectedGraphClip.startFrame + kf.frame,
+    }));
+  }, [graphPropertyKeyframes, selectedGraphClip]);
+
+  useEffect(() => {
+    if (graphPropertyTimelineKeyframes.length === 0) {
+      if (selectedGraphKeyframeId !== null) {
+        setSelectedGraphKeyframeId(null);
+      }
+      if (selectedGraphKeyframeIds.length > 0) {
+        setSelectedGraphKeyframeIds([]);
+      }
+      if (Object.keys(graphMarkerDraftFrames).length > 0) {
+        setGraphMarkerDraftFrames({});
+      }
+      return;
+    }
+    const validIds = new Set(graphPropertyTimelineKeyframes.map((keyframe) => keyframe.id));
+    const filteredSelection = selectedGraphKeyframeIds.filter((id) => validIds.has(id));
+    if (filteredSelection.length !== selectedGraphKeyframeIds.length) {
+      setSelectedGraphKeyframeIds(filteredSelection);
+    }
+    if (selectedGraphKeyframeId && validIds.has(selectedGraphKeyframeId)) {
+      if (filteredSelection.length === 0) {
+        setSelectedGraphKeyframeIds([selectedGraphKeyframeId]);
+      }
+      return;
+    }
+
+    const atPlayhead = graphPropertyTimelineKeyframes.find((keyframe) => keyframe.frame === currentFrame);
+    const nextId = atPlayhead?.id ?? graphPropertyTimelineKeyframes[0]!.id;
+    setSelectedGraphKeyframeId(nextId);
+    setSelectedGraphKeyframeIds([nextId]);
+  }, [
+    graphPropertyTimelineKeyframes,
+    selectedGraphKeyframeId,
+    selectedGraphKeyframeIds,
+    graphMarkerDraftFrames,
+    currentFrame,
+  ]);
+
+  useEffect(() => {
+    const pending = pendingGraphSelectionRef.current;
+    if (!pending || graphPropertyTimelineKeyframes.length === 0) return;
+    const validIds = new Set(graphPropertyTimelineKeyframes.map((keyframe) => keyframe.id));
+    const nextIds = pending.ids.filter((id) => validIds.has(id));
+    if (nextIds.length !== pending.ids.length) return;
+    setSelectedGraphKeyframeIds(nextIds);
+    setSelectedGraphKeyframeId(
+      pending.primaryId && nextIds.includes(pending.primaryId)
+        ? pending.primaryId
+        : nextIds[nextIds.length - 1] ?? null,
+    );
+    pendingGraphSelectionRef.current = null;
+  }, [graphPropertyTimelineKeyframes]);
+
+  const getGraphPropertyKeyframes = useCallback(
+    (property: KeyframeProperty): TimelineClipKeyframe[] =>
+      graphKeyframesByProperty.get(property) ?? [],
+    [graphKeyframesByProperty],
+  );
+
+  const effectiveGraphPropertyTimelineKeyframes = useMemo(
+    () =>
+      [...graphPropertyTimelineKeyframes]
+        .map((keyframe) => ({
+          ...keyframe,
+          frame: graphMarkerDraftFrames[keyframe.id] ?? keyframe.frame,
+        }))
+        .sort((a, b) => a.frame - b.frame),
+    [graphPropertyTimelineKeyframes, graphMarkerDraftFrames],
+  );
+
+  const selectedGraphKeyframes = useMemo(
+    () =>
+      effectiveGraphPropertyTimelineKeyframes.filter((keyframe) => selectedGraphKeyframeIds.includes(keyframe.id)),
+    [effectiveGraphPropertyTimelineKeyframes, selectedGraphKeyframeIds],
+  );
+
+  const toClipLocalFrame = useCallback((clip: TimelineClip, timelineFrame: number): number => {
+    return Math.max(0, Math.min(clip.durationFrames, Math.round(timelineFrame - clip.startFrame)));
+  }, []);
+
+  const getLinkedScaleGraphProperty = useCallback(
+    (property: KeyframeProperty): KeyframeProperty | null => {
+      if (!linkedScale) return null;
+      if (property === 'transform.scaleX') return 'transform.scaleY';
+      if (property === 'transform.scaleY') return 'transform.scaleX';
+      return null;
+    },
+    [linkedScale],
+  );
+
+  const upsertGraphKeyframeWithLinkedScale = useCallback(
+    (
+      property: KeyframeProperty,
+      keyframe: TimelineKeyframeData,
+      options?: { sourceFrame?: number },
+    ) => {
+      if (!selectedGraphClip) return;
+      void upsertClipKeyframe(selectedGraphClip.id, keyframe);
+      const linkedProperty = getLinkedScaleGraphProperty(property);
+      if (!linkedProperty) return;
+      const linkedKeyframes = getGraphPropertyKeyframes(linkedProperty);
+      const sourceFrame = options?.sourceFrame ?? keyframe.frame;
+      const linkedExisting =
+        linkedKeyframes.find((item) => item.frame === sourceFrame) ??
+        linkedKeyframes.find((item) => item.frame === keyframe.frame);
+      void upsertClipKeyframe(selectedGraphClip.id, {
+        id: linkedExisting?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        property: linkedProperty,
+        frame: keyframe.frame,
+        value: keyframe.value,
+        easing: keyframe.easing,
+        bezierHandles: keyframe.bezierHandles,
+      });
+    },
+    [selectedGraphClip, upsertClipKeyframe, getGraphPropertyKeyframes, getLinkedScaleGraphProperty],
+  );
+
+  const resolveGraphPasteLocalFrames = useCallback(
+    (
+      items: Array<
+        Pick<TimelineKeyframeData, 'value' | 'easing' | 'bezierHandles'> & { offsetFrame: number }
+      >,
+      property: KeyframeProperty,
+    ): number[] => {
+      if (!selectedGraphClip || items.length === 0) return [];
+      const baseFrames = items.map((item) =>
+        toClipLocalFrame(selectedGraphClip, currentFrame + item.offsetFrame),
+      );
+      const snap = Math.max(1, graphSnapStep);
+      const existingFrames = new Set(getGraphPropertyKeyframes(property).map((item) => item.frame));
+      const minBase = Math.min(...baseFrames);
+      const maxBase = Math.max(...baseFrames);
+      const maxForwardSteps = Math.max(
+        0,
+        Math.floor((selectedGraphClip.durationFrames - maxBase) / snap),
+      );
+      const maxBackwardSteps = Math.max(0, Math.floor(minBase / snap));
+      const deltas = [
+        0,
+        ...Array.from({ length: maxForwardSteps }, (_, index) => (index + 1) * snap),
+        ...Array.from({ length: maxBackwardSteps }, (_, index) => -((index + 1) * snap)),
+      ];
+
+      for (const delta of deltas) {
+        const candidate = baseFrames.map((frame) =>
+          Math.max(0, Math.min(selectedGraphClip.durationFrames, frame + delta)),
+        );
+        const uniqueCandidate = new Set(candidate);
+        if (uniqueCandidate.size !== candidate.length) continue;
+        if (candidate.every((frame) => !existingFrames.has(frame))) {
+          return candidate;
+        }
+      }
+
+      return baseFrames;
+    },
+    [selectedGraphClip, toClipLocalFrame, currentFrame, graphSnapStep, getGraphPropertyKeyframes],
+  );
+
+  const graphPropertyValueAtPlayhead = useCallback(
+    (property: KeyframeProperty): number => {
+      if (!selectedGraphClip) return 0;
+      switch (property) {
+        case 'speed':
+          return selectedGraphClip.speed ?? 1;
+        case 'volume':
+          return selectedGraphClip.gain ?? selectedGraphClip.audioVolume ?? 1;
+        case 'pan':
+          return selectedGraphClip.pan ?? selectedGraphClip.audioPan ?? 0;
+        case 'brightness':
+          return selectedGraphClip.brightness ?? 1;
+        case 'contrast':
+          return selectedGraphClip.contrast ?? 1;
+        case 'saturation':
+          return selectedGraphClip.saturation ?? 1;
+        case 'hue':
+          return selectedGraphClip.hue ?? 0;
+        case 'vignette':
+          return selectedGraphClip.vignette ?? 0;
+        case 'transform.positionX':
+          return selectedGraphClip.positionX ?? 0;
+        case 'transform.positionY':
+          return selectedGraphClip.positionY ?? 0;
+        case 'transform.scaleX':
+          return selectedGraphClip.scaleX ?? 1;
+        case 'transform.scaleY':
+          return selectedGraphClip.scaleY ?? 1;
+        case 'transform.rotation':
+          return selectedGraphClip.rotation ?? 0;
+        case 'transform.anchorX':
+        case 'transform.anchorY':
+          return 0.5;
+        case 'opacity':
+          return selectedGraphClip.opacity ?? 1;
+        case 'mask.opacity': {
+          const firstMask = selectedGraphClip.masks?.[0];
+          return firstMask?.opacity ?? 1;
+        }
+        case 'mask.feather': {
+          const firstMask = selectedGraphClip.masks?.[0];
+          return firstMask?.feather ?? 0;
+        }
+        case 'mask.expansion': {
+          const firstMask = selectedGraphClip.masks?.[0];
+          return firstMask?.expansion ?? 0;
+        }
+        default:
+          return 0;
+      }
+    },
+    [selectedGraphClip],
+  );
+
+  const addGraphKeyframeAtPlayhead = useCallback(
+    (property: KeyframeProperty = graphProperty) => {
+      if (!selectedGraphClip) return;
+      const clipLocalFrame = toClipLocalFrame(selectedGraphClip, currentFrame);
+      const propertyKeyframes = getGraphPropertyKeyframes(property);
+      const existing = propertyKeyframes.find((kf) => kf.frame === clipLocalFrame);
+      const nextId = existing?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+      upsertGraphKeyframeWithLinkedScale(property, {
+        id: nextId,
+        property,
+        frame: clipLocalFrame,
+        value: graphPropertyValueAtPlayhead(property),
+        easing: existing?.easing ?? 'linear',
+        bezierHandles: existing?.bezierHandles,
+      });
+      pendingGraphSelectionRef.current = { ids: [nextId], primaryId: nextId };
+    },
+    [
+      selectedGraphClip,
+      currentFrame,
+      toClipLocalFrame,
+      getGraphPropertyKeyframes,
+      upsertGraphKeyframeWithLinkedScale,
+      graphProperty,
+      graphPropertyValueAtPlayhead,
+    ],
+  );
+
+  const updateGraphKeyframe = useCallback(
+    (
+      keyframeId: string,
+      patch: Partial<Pick<TimelineKeyframeData, 'frame' | 'value' | 'easing' | 'bezierHandles'>>,
+      propertyOverride?: KeyframeProperty,
+    ) => {
+      if (!selectedGraphClip) return;
+      const property = propertyOverride ?? graphProperty;
+      const propertyKeyframes = getGraphPropertyKeyframes(property);
+      const existing = propertyKeyframes.find((kf) => kf.id === keyframeId);
+      if (!existing) return;
+      const nextEasing = patch.easing ?? existing.easing ?? 'linear';
+      const nextHandles =
+        patch.bezierHandles ??
+        (nextEasing === 'bezier'
+          ? existing.bezierHandles ?? { outX: 0.25, outY: 0.1, inX: 0.75, inY: 0.9 }
+          : existing.bezierHandles);
+      const nextLocalFrame =
+        patch.frame != null
+          ? toClipLocalFrame(selectedGraphClip, patch.frame)
+          : existing.frame;
+      upsertGraphKeyframeWithLinkedScale(
+        property,
+        {
+        ...existing,
+        frame: nextLocalFrame,
+        value: patch.value ?? existing.value,
+        easing: nextEasing,
+        bezierHandles: nextHandles,
+        },
+        { sourceFrame: existing.frame },
+      );
+    },
+    [
+      selectedGraphClip,
+      graphProperty,
+      getGraphPropertyKeyframes,
+      toClipLocalFrame,
+      upsertGraphKeyframeWithLinkedScale,
+    ],
+  );
+
+  const selectedGraphKeyframe = useMemo(
+    () => graphPropertyTimelineKeyframes.find((keyframe) => keyframe.id === selectedGraphKeyframeId) ?? null,
+    [graphPropertyTimelineKeyframes, selectedGraphKeyframeId],
+  );
+
+  const setGraphSelection = useCallback(
+    (ids: string[], primaryId?: string | null) => {
+      const validIds = new Set(graphPropertyTimelineKeyframes.map((keyframe) => keyframe.id));
+      const nextIds = Array.from(new Set(ids)).filter((id) => validIds.has(id));
+      const nextPrimary =
+        primaryId != null && nextIds.includes(primaryId)
+          ? primaryId
+          : nextIds.length > 0
+            ? nextIds[nextIds.length - 1]!
+            : null;
+      setSelectedGraphKeyframeIds(nextIds);
+      setSelectedGraphKeyframeId(nextPrimary);
+    },
+    [graphPropertyTimelineKeyframes],
+  );
+
+  const applyGraphSelection = useCallback(
+    (
+      ids: string[],
+      primaryId?: string | null,
+      options?: {
+        additive?: boolean;
+      },
+    ) => {
+      setGraphSelection(options?.additive ? [...selectedGraphKeyframeIds, ...ids] : ids, primaryId);
+    },
+    [setGraphSelection, selectedGraphKeyframeIds],
+  );
+
+  const selectGraphKeyframe = useCallback(
+    (
+      keyframeId: string,
+      options?: {
+        additive?: boolean;
+        range?: boolean;
+      },
+    ) => {
+      const orderedIds = graphPropertyTimelineKeyframes.map((keyframe) => keyframe.id);
+      if (!orderedIds.includes(keyframeId)) return;
+
+      if (options?.range) {
+        const anchorId =
+          selectedGraphKeyframeId && orderedIds.includes(selectedGraphKeyframeId)
+            ? selectedGraphKeyframeId
+            : keyframeId;
+        const fromIndex = orderedIds.indexOf(anchorId);
+        const toIndex = orderedIds.indexOf(keyframeId);
+        const rangeIds = orderedIds.slice(Math.min(fromIndex, toIndex), Math.max(fromIndex, toIndex) + 1);
+        setGraphSelection(options.additive ? [...selectedGraphKeyframeIds, ...rangeIds] : rangeIds, keyframeId);
+        return;
+      }
+
+      if (options?.additive) {
+        if (selectedGraphKeyframeIds.includes(keyframeId)) {
+          const remaining = selectedGraphKeyframeIds.filter((id) => id !== keyframeId);
+          setGraphSelection(remaining, remaining[remaining.length - 1] ?? null);
+          return;
+        }
+        setGraphSelection([...selectedGraphKeyframeIds, keyframeId], keyframeId);
+        return;
+      }
+
+      setGraphSelection([keyframeId], keyframeId);
+    },
+    [graphPropertyTimelineKeyframes, selectedGraphKeyframeId, selectedGraphKeyframeIds, setGraphSelection],
+  );
+
+  const setSelectedGraphKeyframeEasing = useCallback(
+    (easing: TimelineKeyframeData['easing']) => {
+      const targets =
+        selectedGraphKeyframes.length > 0
+          ? selectedGraphKeyframes
+          : selectedGraphKeyframe
+            ? [selectedGraphKeyframe]
+            : [];
+      for (const keyframe of targets) {
+        updateGraphKeyframe(keyframe.id, {
+          easing,
+          bezierHandles:
+            easing === 'bezier'
+              ? keyframe.bezierHandles ?? {
+                  outX: 0.25,
+                  outY: 0.1,
+                  inX: 0.75,
+                  inY: 0.9,
+                }
+              : keyframe.bezierHandles,
+        });
+      }
+    },
+    [selectedGraphKeyframe, selectedGraphKeyframes, updateGraphKeyframe],
+  );
+
+  const toggleGraphKeyframeCurve = useCallback(
+    (
+      keyframeId: string,
+      propertyOverride: KeyframeProperty = graphProperty,
+    ) => {
+      const existing = getGraphPropertyKeyframes(propertyOverride).find((kf) => kf.id === keyframeId);
+      if (!existing) return;
+      const nextEasing = existing.easing === 'bezier' ? 'linear' : 'bezier';
+      updateGraphKeyframe(keyframeId, {
+        easing: nextEasing,
+        bezierHandles:
+          nextEasing === 'bezier'
+            ? existing.bezierHandles ?? { outX: 0.25, outY: 0.1, inX: 0.75, inY: 0.9 }
+            : existing.bezierHandles,
+      }, propertyOverride);
+    },
+    [graphProperty, getGraphPropertyKeyframes, updateGraphKeyframe],
+  );
+
+  const toggleSelectedGraphKeyframeCurve = useCallback(() => {
+    const targets =
+      selectedGraphKeyframes.length > 0
+        ? selectedGraphKeyframes
+        : selectedGraphKeyframe
+          ? [selectedGraphKeyframe]
+          : [];
+    for (const keyframe of targets) {
+      toggleGraphKeyframeCurve(keyframe.id, graphProperty);
+    }
+  }, [selectedGraphKeyframes, selectedGraphKeyframe, toggleGraphKeyframeCurve, graphProperty]);
+
+  const removeSelectedGraphKeyframe = useCallback(() => {
+    if (!selectedGraphClip) return;
+    const targets =
+      selectedGraphKeyframes.length > 0
+        ? selectedGraphKeyframes
+        : selectedGraphKeyframe
+          ? [selectedGraphKeyframe]
+          : [];
+    if (targets.length === 0) return;
+    const linkedProperty = getLinkedScaleGraphProperty(graphProperty);
+    const linkedKeyframes = linkedProperty ? getGraphPropertyKeyframes(linkedProperty) : [];
+    for (const keyframe of targets) {
+      void removeClipKeyframe(selectedGraphClip.id, keyframe.id);
+      if (!linkedProperty) continue;
+      const localFrame = toClipLocalFrame(selectedGraphClip, keyframe.frame);
+      const linkedMatch = linkedKeyframes.find((item) => item.frame === localFrame);
+      if (linkedMatch) {
+        void removeClipKeyframe(selectedGraphClip.id, linkedMatch.id);
+      }
+    }
+    setGraphSelection([], null);
+  }, [
+    selectedGraphClip,
+    selectedGraphKeyframes,
+    selectedGraphKeyframe,
+    removeClipKeyframe,
+    setGraphSelection,
+    getLinkedScaleGraphProperty,
+    graphProperty,
+    getGraphPropertyKeyframes,
+    toClipLocalFrame,
+  ]);
+
+  const copySelectedGraphKeyframes = useCallback(() => {
+    const source =
+      selectedGraphKeyframes.length > 0
+        ? [...selectedGraphKeyframes].sort((a, b) => a.frame - b.frame)
+        : selectedGraphKeyframe
+          ? [selectedGraphKeyframe]
+          : [];
+    if (source.length === 0) return;
+    const baseFrame = source[0]!.frame;
+    setGraphKeyframeClipboard({
+      property: graphProperty,
+      items: source.map((keyframe) => ({
+        offsetFrame: keyframe.frame - baseFrame,
+        value: keyframe.value,
+        easing: keyframe.easing,
+        bezierHandles: keyframe.bezierHandles,
+      })),
+    });
+  }, [selectedGraphKeyframes, selectedGraphKeyframe, graphProperty]);
+
+  const pasteGraphKeyframesAtPlayhead = useCallback(() => {
+    if (!selectedGraphClip || !graphKeyframeClipboard || graphKeyframeClipboard.property !== graphProperty) return;
+    const nextIds: string[] = [];
+    const targetLocalFrames = resolveGraphPasteLocalFrames(graphKeyframeClipboard.items, graphProperty);
+    graphKeyframeClipboard.items.forEach((item, index) => {
+      const targetFrame = targetLocalFrames[index];
+      if (targetFrame == null) return;
+      const keyframeId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+      nextIds.push(keyframeId);
+      upsertGraphKeyframeWithLinkedScale(graphProperty, {
+        id: keyframeId,
+        property: graphProperty,
+        frame: targetFrame,
+        value: item.value,
+        easing: item.easing,
+        bezierHandles: item.bezierHandles,
+      });
+    });
+    if (nextIds.length > 0) {
+      pendingGraphSelectionRef.current = {
+        ids: nextIds,
+        primaryId: nextIds[nextIds.length - 1] ?? null,
+      };
+    }
+  }, [
+    selectedGraphClip,
+    graphKeyframeClipboard,
+    graphProperty,
+    resolveGraphPasteLocalFrames,
+    upsertGraphKeyframeWithLinkedScale,
+  ]);
+
+  const handleGraphShortcut = useCallback(
+    (event: {
+      key: string;
+      ctrlKey: boolean;
+      metaKey: boolean;
+      target: EventTarget | null;
+      preventDefault: () => void;
+      stopPropagation?: () => void;
+      stopImmediatePropagation?: () => void;
+    }) => {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget =
+        target != null &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable);
+      if (isTypingTarget) return false;
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+        copySelectedGraphKeyframes();
+        return true;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+        pasteGraphKeyframesAtPlayhead();
+        return true;
+      }
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        event.stopPropagation?.();
+        event.stopImmediatePropagation?.();
+        removeSelectedGraphKeyframe();
+        return true;
+      }
+
+      return false;
+    },
+    [
+      copySelectedGraphKeyframes,
+      pasteGraphKeyframesAtPlayhead,
+      removeSelectedGraphKeyframe,
+    ],
+  );
+
+  useEffect(() => {
+    if (timelineViewMode !== 'graph') return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      handleGraphShortcut(event);
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+    };
+  }, [
+    timelineViewMode,
+    handleGraphShortcut,
+  ]);
+
+  useEffect(() => {
+    if (timelineViewMode !== 'graph') return;
+    const frame = window.requestAnimationFrame(() => {
+      graphEditorRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [timelineViewMode, graphProperty, selectedGraphClip?.id]);
+
+  const startGraphOverviewMarkerDrag = useCallback(
+    (keyframeId: string, clientX: number, container: HTMLDivElement | null) => {
+      if (!selectedGraphClip || !container) return;
+      const selectedIds =
+        selectedGraphKeyframeIds.includes(keyframeId) && selectedGraphKeyframeIds.length > 0
+          ? [...selectedGraphKeyframeIds]
+          : [keyframeId];
+      const selectedSet = new Set(selectedIds);
+      const startFrames = Object.fromEntries(
+        graphPropertyTimelineKeyframes
+          .filter((keyframe) => selectedSet.has(keyframe.id))
+          .map((keyframe) => [keyframe.id, keyframe.frame]),
+      );
+      const snap = Math.max(1, graphSnapStep);
+      let minDelta = Number.NEGATIVE_INFINITY;
+      let maxDelta = Number.POSITIVE_INFINITY;
+
+      for (let index = 0; index < graphPropertyTimelineKeyframes.length; index++) {
+        const keyframe = graphPropertyTimelineKeyframes[index]!;
+        if (!selectedSet.has(keyframe.id)) continue;
+        const prevUnselected = [...graphPropertyTimelineKeyframes.slice(0, index)]
+          .reverse()
+          .find((candidate) => !selectedSet.has(candidate.id));
+        const nextUnselected = graphPropertyTimelineKeyframes
+          .slice(index + 1)
+          .find((candidate) => !selectedSet.has(candidate.id));
+        minDelta = Math.max(minDelta, (prevUnselected?.frame ?? 0) + (prevUnselected ? snap : 0) - keyframe.frame);
+        maxDelta = Math.min(
+          maxDelta,
+          (nextUnselected?.frame ?? graphClipEndFrame) - (nextUnselected ? snap : 0) - keyframe.frame,
+        );
+      }
+
+      graphMarkerDragRef.current = {
+        clipId: selectedGraphClip.id,
+        property: graphProperty,
+        container,
+        anchorClientX: clientX,
+        selectedIds,
+        startFrames,
+        minDelta,
+        maxDelta,
+      };
+    },
+    [
+      selectedGraphClip,
+      selectedGraphKeyframeIds,
+      graphPropertyTimelineKeyframes,
+      graphSnapStep,
+      graphClipEndFrame,
+      graphProperty,
+    ],
+  );
+
+  const clickGraphTimelineFrame = useCallback(
+    (clientX: number, element: HTMLDivElement | null) => {
+      if (!element) return;
+      const rect = element.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+      setCurrentFrame(Math.max(0, Math.round(pct * timelineGraphEndFrame)));
+    },
+    [setCurrentFrame, timelineGraphEndFrame],
+  );
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (graphMarkerDragRef.current) {
+        const drag = graphMarkerDragRef.current;
+        const rect = drag.container.getBoundingClientRect();
+        const startPct = Math.max(0, Math.min(1, (drag.anchorClientX - rect.left) / Math.max(1, rect.width)));
+        const currentPct = Math.max(0, Math.min(1, (e.clientX - rect.left) / Math.max(1, rect.width)));
+        const rawDelta = (currentPct - startPct) * timelineGraphEndFrame;
+        const snap = Math.max(1, graphSnapStep);
+        const snappedDelta = Math.round(rawDelta / snap) * snap;
+        const boundedDelta = Math.max(drag.minDelta, Math.min(drag.maxDelta, snappedDelta));
+        setGraphMarkerDraftFrames(
+          Object.fromEntries(
+            drag.selectedIds.map((id) => [id, Math.max(0, Math.round((drag.startFrames[id] ?? 0) + boundedDelta))]),
+          ),
+        );
+        return;
+      }
+      if (!graphScrubRef.current) return;
+      clickGraphTimelineFrame(e.clientX, graphScrubRef.current);
+    };
+    const onUp = () => {
+      if (graphMarkerDragRef.current) {
+        const drag = graphMarkerDragRef.current;
+        const draftFrames = { ...graphMarkerDraftFrames };
+        graphMarkerDragRef.current = null;
+        setGraphMarkerDraftFrames({});
+        for (const id of drag.selectedIds) {
+          const nextFrame = draftFrames[id];
+          if (nextFrame == null) continue;
+          updateGraphKeyframe(id, { frame: nextFrame }, drag.property);
+        }
+      }
+      graphScrubRef.current = null;
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [clickGraphTimelineFrame, graphMarkerDraftFrames, graphSnapStep, timelineGraphEndFrame, updateGraphKeyframe]);
+
+  const jumpGraphKeyframe = useCallback(
+    (direction: -1 | 1, property: KeyframeProperty = graphProperty) => {
+      if (!selectedGraphClip) return;
+      const propertyKeyframes = getGraphPropertyKeyframes(property);
+      if (propertyKeyframes.length === 0) return;
+      const timelineKeyframes = propertyKeyframes.map((kf) => ({
+        ...kf,
+        timelineFrame: selectedGraphClip.startFrame + kf.frame,
+      }));
+      if (direction < 0) {
+        const prev = [...timelineKeyframes].reverse().find((kf) => kf.timelineFrame < currentFrame);
+        const target = prev ?? timelineKeyframes[0];
+        setCurrentFrame(Math.max(0, target.timelineFrame));
+        setGraphSelection([target.id], target.id);
+        return;
+      }
+      const next = timelineKeyframes.find((kf) => kf.timelineFrame > currentFrame);
+      const target = next ?? timelineKeyframes[timelineKeyframes.length - 1];
+      setCurrentFrame(Math.max(0, target.timelineFrame));
+      setGraphSelection([target.id], target.id);
+    },
+    [
+      selectedGraphClip,
+      getGraphPropertyKeyframes,
+      currentFrame,
+      setCurrentFrame,
+      graphProperty,
+      setGraphSelection,
+    ],
+  );
+
+  useEffect(() => {
+    if (timelineViewMode !== 'graph') return;
+    if (timelineTool !== 'select') {
+      setTimelineTool('select');
+    }
+  }, [timelineViewMode, timelineTool, setTimelineTool]);
 
   const resolveTargetVideoTrackId = useCallback((): string | null => {
     const unlocked = tracks.filter((t) => t.type === 'video' && !t.locked);
@@ -892,14 +1823,44 @@ export function Timeline() {
     [tracks],
   );
 
+  const resolveDropTrack = useCallback(
+    (asset: Pick<ApiMediaAsset, 'type'>, initialTrack: TimelineTrack | null): TimelineTrack | null => {
+      const expectedType = asset.type === 'audio' ? 'audio' : 'video';
+      if (initialTrack && initialTrack.type === expectedType) {
+        return initialTrack;
+      }
+
+      const isAudio = asset.type === 'audio';
+      const videoTracks = tracks.filter((track) => track.type === 'video');
+      const audioTracks = tracks.filter((track) => track.type === 'audio');
+      const preferredVideo =
+        videoTracks.find((track) => track.name.trim().toUpperCase() === 'V1') ??
+        [...videoTracks].sort((a, b) => a.index - b.index)[0];
+      const preferredAudio =
+        audioTracks.find((track) => track.name.trim().toUpperCase() === 'A1') ??
+        [...audioTracks].sort((a, b) => a.index - b.index)[0];
+      return (isAudio ? preferredAudio : preferredVideo) ?? tracks[0] ?? null;
+    },
+    [tracks],
+  );
+
+  const estimateDroppedClipFrames = useCallback(
+    (asset: ApiMediaAsset): number => {
+      const baseDuration = asset.duration != null && asset.duration > 0 ? asset.duration : 5;
+      return Math.max(1, Math.round(baseDuration * fps));
+    },
+    [fps],
+  );
+
   const handleDrop = useCallback(
-    (e: React.DragEvent<HTMLDivElement>) => {
+    async (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
+      e.stopPropagation();
       setIsDragOverFiles(false);
 
       // Native OS file drops
       if (e.dataTransfer.files.length > 0) {
-        const mediaFiles: File[] = [];
+        const mediaFiles = new Map<string, File>();
         for (const file of e.dataTransfer.files) {
           const ext = '.' + file.name.split('.').pop()?.toLowerCase();
           if (
@@ -908,11 +1869,29 @@ export function Timeline() {
             file.type.startsWith('audio/') ||
             file.type.startsWith('image/')
           ) {
-            mediaFiles.push(file);
+            const signature = [file.name, file.size, file.lastModified, file.type].join(':');
+            mediaFiles.set(signature, file);
           }
         }
-        if (mediaFiles.length > 0) {
-          uploadMedia(mediaFiles);
+        if (mediaFiles.size > 0) {
+          const droppedFiles = [...mediaFiles.values()];
+          const container = containerRef.current;
+          const suggestedTrack = getTrackFromDropY(e);
+          const rect = container?.getBoundingClientRect();
+          const x = rect ? e.clientX - rect.left + container!.scrollLeft : 0;
+          let cursorFrame = Math.max(0, Math.round(x / pxPerFrame));
+          const importedAssets = await uploadMedia(droppedFiles);
+          for (const asset of importedAssets) {
+            const targetTrack = resolveDropTrack(asset, suggestedTrack);
+            if (!targetTrack) continue;
+            await addClipToTrack({
+              trackId: targetTrack.id,
+              asset,
+              startFrame: cursorFrame,
+              insertMode: rippleMode ? 'ripple' : 'overwrite',
+            });
+            cursorFrame += estimateDroppedClipFrames(asset);
+          }
           return;
         }
       }
@@ -930,23 +1909,7 @@ export function Timeline() {
             parsed.audioOnly && parsed.asset.type === 'video'
               ? ({ ...parsed.asset, type: 'audio' } as ApiMediaAsset)
               : parsed.asset;
-          let targetTrack = getTrackFromDropY(e);
-          const expectedType = effectiveAsset.type === 'audio' ? 'audio' : 'video';
-          if (targetTrack && targetTrack.type !== expectedType) {
-            targetTrack = null;
-          }
-          if (!targetTrack) {
-            const isAudio = effectiveAsset.type === 'audio';
-            const videoTracks = tracks.filter((t) => t.type === 'video');
-            const audioTracks = tracks.filter((t) => t.type === 'audio');
-            const preferredVideo =
-              videoTracks.find((t) => t.name.trim().toUpperCase() === 'V1') ??
-              [...videoTracks].sort((a, b) => a.index - b.index)[0];
-            const preferredAudio =
-              audioTracks.find((t) => t.name.trim().toUpperCase() === 'A1') ??
-              [...audioTracks].sort((a, b) => a.index - b.index)[0];
-            targetTrack = (isAudio ? preferredAudio : preferredVideo) ?? tracks[0] ?? null;
-          }
+          const targetTrack = resolveDropTrack(effectiveAsset, getTrackFromDropY(e));
           if (!targetTrack) return;
           const container = containerRef.current;
           if (!container) return;
@@ -986,23 +1949,7 @@ export function Timeline() {
             payload.audioOnly && payload.type === 'video'
               ? ({ ...payload, type: 'audio' } as ApiMediaAsset)
               : (payload as ApiMediaAsset);
-          let targetTrack = getTrackFromDropY(e);
-          const expectedType = asset.type === 'audio' ? 'audio' : 'video';
-          if (targetTrack && targetTrack.type !== expectedType) {
-            targetTrack = null;
-          }
-          if (!targetTrack) {
-            const isAudio = asset.type === 'audio';
-            const videoTracks = tracks.filter((t) => t.type === 'video');
-            const audioTracks = tracks.filter((t) => t.type === 'audio');
-            const preferredVideo =
-              videoTracks.find((t) => t.name.trim().toUpperCase() === 'V1') ??
-              [...videoTracks].sort((a, b) => a.index - b.index)[0];
-            const preferredAudio =
-              audioTracks.find((t) => t.name.trim().toUpperCase() === 'A1') ??
-              [...audioTracks].sort((a, b) => a.index - b.index)[0];
-            targetTrack = (isAudio ? preferredAudio : preferredVideo) ?? tracks[0] ?? null;
-          }
+          const targetTrack = resolveDropTrack(asset, getTrackFromDropY(e));
           if (!targetTrack) return;
           const container = containerRef.current;
           if (!container) return;
@@ -1032,7 +1979,8 @@ export function Timeline() {
       uploadMedia,
       addClipToTrack,
       getTrackFromDropY,
-      tracks,
+      resolveDropTrack,
+      estimateDroppedClipFrames,
       pxPerFrame,
       rippleMode,
       maybePromptFirstClipProjectMatch,
@@ -1041,6 +1989,7 @@ export function Timeline() {
 
   const handleDragOverTimeline = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     e.dataTransfer.dropEffect = 'copy';
     if (
       e.dataTransfer.types.includes('Files') ||
@@ -1053,6 +2002,7 @@ export function Timeline() {
 
   const handleDragLeaveTimeline = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDragOverFiles(false);
   }, []);
 
@@ -1185,9 +2135,46 @@ export function Timeline() {
           <span className="rounded bg-zinc-700/50 px-1.5 py-0.5 font-mono text-[9px] text-zinc-500">
             {Math.round(fps)}fps
           </span>
+          <div className="ml-2 flex items-center gap-1 rounded border border-zinc-700 bg-zinc-800/50 p-0.5">
+            <button
+              className={`rounded px-1.5 py-0.5 text-[10px] ${
+                timelineViewMode === 'timeline'
+                  ? 'bg-blue-500/25 text-blue-200'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              onClick={() => setTimelineViewMode('timeline')}
+              title="Classic timeline view"
+            >
+              Timeline
+            </button>
+            <button
+              className={`rounded px-1.5 py-0.5 text-[10px] ${
+                timelineViewMode === 'graph'
+                  ? 'bg-blue-500/25 text-blue-200'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+              onClick={() => setTimelineViewMode('graph')}
+              title="Graph editor view"
+            >
+              Graph
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1">
+          {timelineViewMode === 'graph' ? (
+            <div className="flex items-center gap-1">
+              <span className="rounded bg-zinc-700/40 px-1.5 py-0.5 text-[10px] text-zinc-300">
+                {selectedGraphClip
+                  ? `${selectedGraphClip.name} @ ${currentFrame}f`
+                  : 'No clip selected'}
+              </span>
+              <span className="rounded bg-zinc-700/30 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                {KEYFRAME_PROPERTIES.find((property) => property.value === graphProperty)?.label ??
+                  graphProperty}
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
             <button
               className={`rounded px-1.5 py-0.5 text-[10px] ${timelineTool === 'select' ? 'bg-blue-500/20 text-blue-200' : 'text-zinc-500 hover:text-zinc-300'}`}
               title="Selection tool (V)"
@@ -1354,7 +2341,8 @@ export function Timeline() {
             <span className="rounded bg-zinc-700/40 px-1 py-0.5 text-[9px] text-fuchsia-300">
               {markers.length}m
             </span>
-          </div>
+            </div>
+          )}
           <span className="font-mono text-xs text-zinc-400">{formatTimecode(currentFrame)}</span>
         </div>
       </div>
@@ -1400,7 +2388,373 @@ export function Timeline() {
       )}
 
       {/* Body */}
-      <div className="flex flex-1 overflow-hidden">
+      {timelineViewMode === 'graph' ? (
+        <div
+          ref={graphEditorRef}
+          tabIndex={0}
+          className="flex flex-1 overflow-hidden focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+          onMouseDown={() => graphEditorRef.current?.focus()}
+          onKeyDown={(event) => {
+            handleGraphShortcut(event.nativeEvent);
+          }}
+        >
+          <div className="flex flex-1 flex-col overflow-hidden px-3 py-2">
+            {!selectedGraphClip ? (
+              <div className="flex flex-1 items-center justify-center rounded border border-zinc-700 bg-zinc-900/40 text-sm text-zinc-500">
+                Select one clip in the timeline to edit keyframes.
+              </div>
+            ) : (
+              <>
+                <div className="mb-2 rounded border border-zinc-700 bg-zinc-900/40 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] text-zinc-500">Clip</span>
+                      <span className="rounded bg-zinc-700/40 px-1.5 py-0.5 text-[10px] text-zinc-200">
+                        {selectedGraphClip.name}
+                      </span>
+                      <span className="rounded bg-zinc-700/40 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
+                        {currentFrame}f
+                      </span>
+                      <span className="rounded bg-zinc-700/30 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                        {KEYFRAME_PROPERTIES.find((property) => property.value === graphProperty)?.label ??
+                          graphProperty}
+                      </span>
+                    </div>
+                    <button
+                      className="rounded bg-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-600"
+                      onClick={() => setTimelineViewMode('timeline')}
+                    >
+                      Back to Timeline
+                    </button>
+                  </div>
+
+                  <div
+                    className="relative mt-2 h-14 rounded border border-zinc-700 bg-zinc-950/70"
+                    onMouseDown={(e) => {
+                      graphScrubRef.current = e.currentTarget;
+                      clickGraphTimelineFrame(e.clientX, e.currentTarget);
+                    }}
+                  >
+                    <div className="absolute inset-x-0 top-0 h-6 border-b border-zinc-800/80">
+                      {Array.from({ length: 11 }).map((_, index) => {
+                        const pct = index / 10;
+                        const frame = Math.round(pct * timelineGraphEndFrame);
+                        return (
+                          <div
+                            key={`graph-tick-${frame}`}
+                            className="absolute top-0 bottom-0"
+                            style={{ left: `${pct * 100}%` }}
+                          >
+                            <div className="h-2 w-px bg-zinc-700" />
+                            <div className="mt-1 -translate-x-1/2 font-mono text-[9px] text-zinc-500">
+                              {frame}f
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div ref={graphOverviewRef} className="absolute inset-x-0 bottom-0 top-6">
+                      {effectiveGraphPropertyTimelineKeyframes.map((marker) => {
+                        const pct = Math.max(0, Math.min(1, marker.frame / Math.max(1, timelineGraphEndFrame)));
+                        const isSelected = selectedGraphKeyframeIds.includes(marker.id);
+                        return (
+                          <button
+                            key={`overview-${graphProperty}-${marker.id}`}
+                            className={`absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border ${
+                              isSelected
+                                ? 'border-amber-100 bg-amber-300'
+                                : 'border-blue-100 bg-blue-300'
+                            }`}
+                            style={{
+                              left: `${pct * 100}%`,
+                              backgroundColor: isSelected ? undefined : keyframeColor(graphProperty),
+                            }}
+                            title={`${KEYFRAME_PROPERTIES.find((property) => property.value === graphProperty)?.label ?? graphProperty} @ ${marker.frame}f`}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              selectGraphKeyframe(marker.id, {
+                                additive: e.ctrlKey || e.metaKey,
+                                range: e.shiftKey,
+                              });
+                              setCurrentFrame(Math.max(0, Math.round(marker.frame)));
+                              if (!(e.ctrlKey || e.metaKey || e.shiftKey)) {
+                                startGraphOverviewMarkerDrag(marker.id, e.clientX, graphOverviewRef.current);
+                              }
+                            }}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              selectGraphKeyframe(marker.id);
+                              toggleGraphKeyframeCurve(marker.id, graphProperty);
+                            }}
+                          />
+                        );
+                      })}
+                      <div
+                        className="pointer-events-none absolute top-0 bottom-0 w-0.5 -translate-x-1/2 bg-blue-400"
+                        style={{
+                          left: `${Math.max(0, Math.min(1, currentFrame / Math.max(1, timelineGraphEndFrame))) * 100}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <select
+                      value={graphSnapStep}
+                      onChange={(e) => setGraphSnapStep(Math.max(1, Number(e.target.value) || 1))}
+                      className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-1 text-[10px] text-zinc-300"
+                      title="Graph drag snap (frames)"
+                    >
+                      <option value={1}>Snap 1f</option>
+                      <option value={2}>Snap 2f</option>
+                      <option value={5}>Snap 5f</option>
+                      <option value={10}>Snap 10f</option>
+                    </select>
+                    <IconActionButton
+                      title="Previous keyframe"
+                      onClick={() => jumpGraphKeyframe(-1)}
+                      disabled={graphPropertyKeyframes.length === 0}
+                    >
+                      <PrevGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Add/update keyframe at playhead"
+                      onClick={() => addGraphKeyframeAtPlayhead()}
+                    >
+                      <AddKeyGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Next keyframe"
+                      onClick={() => jumpGraphKeyframe(1)}
+                      disabled={graphPropertyKeyframes.length === 0}
+                    >
+                      <NextGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title={
+                        selectedGraphKeyframeIds.length > 1
+                          ? 'Remove selected keyframes'
+                          : 'Remove selected keyframe'
+                      }
+                      onClick={removeSelectedGraphKeyframe}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      destructive
+                    >
+                      <TrashGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Copy selected keyframes"
+                      onClick={copySelectedGraphKeyframes}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                    >
+                      <CopyGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Paste copied keyframes at playhead"
+                      onClick={pasteGraphKeyframesAtPlayhead}
+                      disabled={!graphKeyframeClipboard || graphKeyframeClipboard.property !== graphProperty}
+                    >
+                      <PasteGlyph />
+                    </IconActionButton>
+                    <div className="mx-1 h-5 w-px bg-zinc-700" />
+                    <IconActionButton
+                      title="Linear interpolation"
+                      onClick={() => setSelectedGraphKeyframeEasing('linear')}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      active={selectedGraphKeyframe?.easing === 'linear'}
+                    >
+                      <LinearGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Ease in"
+                      onClick={() => setSelectedGraphKeyframeEasing('ease-in')}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      active={selectedGraphKeyframe?.easing === 'ease-in'}
+                    >
+                      <EaseInGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Ease out"
+                      onClick={() => setSelectedGraphKeyframeEasing('ease-out')}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      active={selectedGraphKeyframe?.easing === 'ease-out'}
+                    >
+                      <EaseOutGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Ease in/out"
+                      onClick={() => setSelectedGraphKeyframeEasing('ease-in-out')}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      active={selectedGraphKeyframe?.easing === 'ease-in-out'}
+                    >
+                      <EaseInOutGlyph />
+                    </IconActionButton>
+                    <IconActionButton
+                      title="Bezier / smooth"
+                      onClick={toggleSelectedGraphKeyframeCurve}
+                      disabled={!selectedGraphKeyframe && selectedGraphKeyframeIds.length === 0}
+                      active={selectedGraphKeyframe?.easing === 'bezier'}
+                    >
+                      <BezierGlyph />
+                    </IconActionButton>
+                    <button
+                      className={`ml-2 rounded px-2 py-1 text-[10px] ${
+                        autoKeyframeEnabled
+                          ? 'bg-emerald-700/80 text-white hover:bg-emerald-600'
+                          : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+                      }`}
+                      onClick={() => setAutoKeyframeEnabled(!autoKeyframeEnabled)}
+                      title="Auto-create keyframes while changing animated properties"
+                    >
+                      {autoKeyframeEnabled ? 'Auto' : 'Auto Off'}
+                    </button>
+                  </div>
+                </div>
+                <div className="flex min-h-[30rem] flex-1 gap-3">
+                  <div className="w-44 overflow-y-auto rounded border border-zinc-700 bg-zinc-900/40 p-2">
+                    <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                      Property Lanes
+                    </div>
+                    <div className="space-y-1">
+                      {graphPropertiesWithKeyframes.length === 0 && (
+                        <div className="rounded border border-zinc-700 bg-zinc-900/40 px-2 py-2 text-[10px] text-zinc-500">
+                          No keyframed properties yet.
+                        </div>
+                      )}
+                      {graphPropertiesWithKeyframes.map((property) => {
+                        const rowKeyframes = getGraphPropertyKeyframes(property.value);
+                        const isActive = graphProperty === property.value;
+                        return (
+                          <div
+                            key={property.value}
+                            className={`rounded border p-1 ${
+                              isActive ? 'border-blue-500/50 bg-blue-500/10' : 'border-zinc-700 bg-zinc-900/30'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <button
+                                className={`rounded px-1 py-0.5 text-[10px] ${
+                                  isActive
+                                    ? 'bg-blue-500/20 text-blue-100'
+                                    : 'text-zinc-300 hover:bg-zinc-700'
+                                }`}
+                                onClick={() => setGraphProperty(property.value)}
+                                title="Focus this property in curve editor"
+                              >
+                                {property.label}
+                              </button>
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">
+                                {rowKeyframes.length}
+                              </span>
+                            </div>
+                            <div
+                              className="mt-1 relative h-5 rounded bg-zinc-950/70"
+                              onMouseDown={(e) => {
+                                graphScrubRef.current = e.currentTarget;
+                                clickGraphTimelineFrame(e.clientX, e.currentTarget);
+                              }}
+                            >
+                              <div
+                                className="pointer-events-none absolute top-0 bottom-0 w-0.5 -translate-x-1/2 bg-blue-400/90"
+                                style={{
+                                  left: `${Math.max(0, Math.min(1, currentFrame / Math.max(1, timelineGraphEndFrame))) * 100}%`,
+                                }}
+                              />
+                              {rowKeyframes.map((keyframe) => {
+                                const timelineFrame = selectedGraphClip.startFrame + keyframe.frame;
+                                const pct = Math.max(
+                                  0,
+                                  Math.min(1, timelineFrame / Math.max(1, timelineGraphEndFrame)),
+                                );
+                                const isSelected = selectedGraphKeyframeIds.includes(keyframe.id);
+                                return (
+                                  <button
+                                    key={`${property.value}-${keyframe.id}`}
+                                    className={`absolute top-1/2 h-2.5 w-2.5 -translate-y-1/2 -translate-x-1/2 rotate-45 border ${
+                                      isSelected
+                                        ? 'border-amber-100 bg-amber-300'
+                                        : isActive
+                                          ? 'border-blue-100 bg-blue-300'
+                                          : 'border-zinc-900 bg-zinc-200'
+                                    }`}
+                                    style={{
+                                      left: `${pct * 100}%`,
+                                      backgroundColor: isSelected ? undefined : keyframeColor(property.value),
+                                    }}
+                                    title={`${property.label} @ ${timelineFrame}f`}
+                                    onMouseDown={(e) => {
+                                      e.stopPropagation();
+                                      setGraphProperty(property.value);
+                                      setCurrentFrame(Math.max(0, Math.round(timelineFrame)));
+                                      if (property.value === graphProperty) {
+                                        selectGraphKeyframe(keyframe.id, {
+                                          additive: e.ctrlKey || e.metaKey,
+                                          range: e.shiftKey,
+                                        });
+                                      } else {
+                                        setSelectedGraphKeyframeId(keyframe.id);
+                                        setSelectedGraphKeyframeIds([keyframe.id]);
+                                      }
+                                    }}
+                                    onDoubleClick={(e) => {
+                                      e.stopPropagation();
+                                      setGraphProperty(property.value);
+                                      setSelectedGraphKeyframeId(keyframe.id);
+                                      setSelectedGraphKeyframeIds([keyframe.id]);
+                                      toggleGraphKeyframeCurve(keyframe.id, property.value);
+                                    }}
+                                  />
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="min-w-0 flex flex-1 flex-col">
+                    <KeyframeMiniGraph
+                      keyframes={graphPropertyTimelineKeyframes}
+                      clipDuration={timelineGraphEndFrame}
+                      property={graphProperty}
+                      currentFrame={currentFrame}
+                      snapStep={graphSnapStep}
+                      selectedKeyframeId={selectedGraphKeyframeId}
+                      selectedKeyframeIds={selectedGraphKeyframeIds}
+                      onSelectKeyframe={(keyframeId, options) =>
+                        selectGraphKeyframe(keyframeId, {
+                          additive: options?.additive,
+                          range: options?.range,
+                        })
+                      }
+                      onSetSelection={applyGraphSelection}
+                      onToggleKeyframeCurve={(keyframeId) => toggleGraphKeyframeCurve(keyframeId, graphProperty)}
+                      onCommit={(keyframeId, patch) =>
+                        updateGraphKeyframe(keyframeId, {
+                          frame: patch.frame,
+                          value: patch.value,
+                          bezierHandles: patch.bezierHandles,
+                        })
+                      }
+                    />
+                    <div className="mt-2 text-[10px] text-zinc-500">
+                      Drag markers in the top strip to retime selected keyframes. Ctrl/Cmd adds to selection, Shift
+                      selects a range, copy/paste works per property, wheel zooms, Shift+Wheel pans, middle mouse
+                      pans the curve view, and double-click toggles smooth handles. Hold Alt while dragging a handle
+                      to break symmetry.
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+          <aside className="w-12 flex-shrink-0 border-l border-zinc-700 bg-zinc-900/85 px-1 py-2">
+            <AudioMeters left={audioMeterLeft} right={audioMeterRight} />
+          </aside>
+        </div>
+      ) : (
+        <div className="flex flex-1 overflow-hidden">
         {/* Track headers */}
         <div
           ref={headerScrollRef}
@@ -1740,6 +3094,7 @@ export function Timeline() {
                     return keyframe.frame;
                   };
                   const hasKeyframeLane = (clip.keyframes?.length ?? 0) > 0 && style.width > 24;
+                  const showClipKeyframeMarkers = false;
                   const clipSpeed = clip.speed ?? 1;
                   const showSpeedBadge = Math.abs(clipSpeed - 1) > 0.001;
                   const speedBadge =
@@ -1784,7 +3139,7 @@ export function Timeline() {
                           </span>
                         )}
                       </div>
-                      {(clip.keyframes?.length ?? 0) > 0 && (
+                      {showClipKeyframeMarkers && (clip.keyframes?.length ?? 0) > 0 && (
                         <div className="pointer-events-none absolute left-1 right-1 top-4 h-2">
                           {clip.keyframes!.map((kf) => {
                             const pct = Math.max(
@@ -1801,7 +3156,7 @@ export function Timeline() {
                           })}
                         </div>
                       )}
-                      {hasKeyframeLane && (
+                      {showClipKeyframeMarkers && hasKeyframeLane && (
                         <div className="absolute bottom-2 left-1 right-1 h-2 rounded bg-black/25">
                           <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-zinc-300/20" />
                           {clip.keyframes!.map((kf) => {
@@ -2029,6 +3384,7 @@ export function Timeline() {
           <AudioMeters left={audioMeterLeft} right={audioMeterRight} />
         </aside>
       </div>
+      )}
 
       <ConfirmDialog
         open={!!firstClipPrompt}

@@ -51,12 +51,18 @@ export interface ClipItem {
   volume: number; // Clip-level gain 0.0 - 2.0
   pan: number; // Clip-level pan -1.0 to 1.0
   audioEnvelope: AudioEnvelopePoint[]; // Gain automation points
+  speed?: number; // Playback rate multiplier (negative = reverse)
 
   // Transform properties (for video/image clips)
   transform: TransformState;
 
   // Visual properties
   opacity: number; // 0.0 - 1.0
+  brightness?: number; // 1.0 = neutral
+  contrast?: number; // 1.0 = neutral
+  saturation?: number; // 1.0 = neutral
+  hue?: number; // Degrees
+  vignette?: number; // -1.0..1.0
   blendMode: BlendMode;
   blendParams?: ClipBlendParams;
 

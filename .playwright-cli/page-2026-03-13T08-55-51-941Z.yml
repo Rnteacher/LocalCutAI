@@ -1,0 +1,275 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - heading "LOCALCUT" [level=1] [ref=e5]
+    - generic [ref=e6]: v0.1.0
+    - generic [ref=e28]: /
+    - generic [ref=e29]: test
+    - generic [ref=e30]:
+      - combobox "Project FPS" [ref=e31]:
+        - option "24fps" [selected]
+        - option "25fps"
+        - option "30fps"
+        - option "60fps"
+      - combobox "Project resolution" [ref=e32]:
+        - option "1280x720"
+        - option "1920x1080" [selected]
+      - combobox "Audio sample rate" [ref=e33]:
+        - option "44.1kHz"
+        - option "48kHz" [selected]
+      - button "Export" [ref=e34]
+      - button "Settings" [ref=e35]
+      - generic [ref=e36]: C:\Users\ronen\LocalCut-Projects\test__JMDwY3L8WfR
+  - main [ref=e37]:
+    - complementary [ref=e39]:
+      - generic [ref=e40]:
+        - generic [ref=e41]:
+          - text: Media
+          - generic [ref=e42]: test
+        - generic [ref=e43]:
+          - button "◀" [ref=e44]
+          - button "Back" [ref=e45]
+          - button "+ Import" [ref=e46]
+      - generic [ref=e47]:
+        - textbox "Search media..." [ref=e48]
+        - generic [ref=e49]:
+          - combobox [ref=e50]:
+            - option "All Types" [selected]
+            - option "Video"
+            - option "Audio"
+            - option "Image"
+          - button "List" [ref=e51]
+          - button "Grid" [ref=e52]
+      - generic [ref=e53]:
+        - button "___202602101933_kq0s4.mp4 video 0:08 1280×720 1.8 MB" [ref=e54]:
+          - generic [ref=e57]:
+            - generic [ref=e58]: ___202602101933_kq0s4.mp4
+            - generic [ref=e59]:
+              - generic [ref=e60]: video
+              - generic [ref=e61]: 0:08
+              - generic [ref=e62]: 1280×720
+              - generic [ref=e63]: 1.8 MB
+        - button "___202602101929_7wkz6.mp4 video 0:08 1280×720 4.9 MB" [ref=e64]:
+          - generic [ref=e67]:
+            - generic [ref=e68]: ___202602101929_7wkz6.mp4
+            - generic [ref=e69]:
+              - generic [ref=e70]: video
+              - generic [ref=e71]: 0:08
+              - generic [ref=e72]: 1280×720
+              - generic [ref=e73]: 4.9 MB
+        - button "___202602101929_1fyc8.mp4 video 0:08 1280×720 7.5 MB" [ref=e74]:
+          - generic [ref=e77]:
+            - generic [ref=e78]: ___202602101929_1fyc8.mp4
+            - generic [ref=e79]:
+              - generic [ref=e80]: video
+              - generic [ref=e81]: 0:08
+              - generic [ref=e82]: 1280×720
+              - generic [ref=e83]: 7.5 MB
+        - button "___202602101929_k9d5c.mp4 video 0:08 1280×720 5.5 MB" [ref=e84]:
+          - generic [ref=e87]:
+            - generic [ref=e88]: ___202602101929_k9d5c.mp4
+            - generic [ref=e89]:
+              - generic [ref=e90]: video
+              - generic [ref=e91]: 0:08
+              - generic [ref=e92]: 1280×720
+              - generic [ref=e93]: 5.5 MB
+        - button "Gemini_Generated_Image_uupcchuupcchuupc.png Gemini_Generated_Image_uupcchuupcchuupc.png image 1376×768 7.7 MB" [ref=e94]:
+          - img "Gemini_Generated_Image_uupcchuupcchuupc.png" [ref=e96]
+          - generic [ref=e97]:
+            - generic [ref=e98]: Gemini_Generated_Image_uupcchuupcchuupc.png
+            - generic [ref=e99]:
+              - generic [ref=e100]: image
+              - generic [ref=e101]: 1376×768
+              - generic [ref=e102]: 7.7 MB
+        - button "Gemini_Generated_Image_720aob720aob720a.png Gemini_Generated_Image_720aob720aob720a.png image 2752×1536 8.7 MB" [ref=e103]:
+          - img "Gemini_Generated_Image_720aob720aob720a.png" [ref=e105]
+          - generic [ref=e106]:
+            - generic [ref=e107]: Gemini_Generated_Image_720aob720aob720a.png
+            - generic [ref=e108]:
+              - generic [ref=e109]: image
+              - generic [ref=e110]: 2752×1536
+              - generic [ref=e111]: 8.7 MB
+        - button "Gemini_Generated_Image_89o2tx89o2tx89o2.png Gemini_Generated_Image_89o2tx89o2tx89o2.png image 2752×1536 9.0 MB" [ref=e112]:
+          - img "Gemini_Generated_Image_89o2tx89o2tx89o2.png" [ref=e114]
+          - generic [ref=e115]:
+            - generic [ref=e116]: Gemini_Generated_Image_89o2tx89o2tx89o2.png
+            - generic [ref=e117]:
+              - generic [ref=e118]: image
+              - generic [ref=e119]: 2752×1536
+              - generic [ref=e120]: 9.0 MB
+        - button "XpfauWu0kmpA.png XpfauWu0kmpA.png image 1376×768 7.7 MB" [ref=e121]:
+          - img "XpfauWu0kmpA.png" [ref=e123]
+          - generic [ref=e124]:
+            - generic [ref=e125]: XpfauWu0kmpA.png
+            - generic [ref=e126]:
+              - generic [ref=e127]: image
+              - generic [ref=e128]: 1376×768
+              - generic [ref=e129]: 7.7 MB
+        - button "6y2xzVVA0lV1.png 6y2xzVVA0lV1.png image 2752×1536 8.7 MB" [ref=e130]:
+          - img "6y2xzVVA0lV1.png" [ref=e132]
+          - generic [ref=e133]:
+            - generic [ref=e134]: 6y2xzVVA0lV1.png
+            - generic [ref=e135]:
+              - generic [ref=e136]: image
+              - generic [ref=e137]: 2752×1536
+              - generic [ref=e138]: 8.7 MB
+        - button "6y2xzVVA0lV1.png 6y2xzVVA0lV1.png image 2752×1536 8.7 MB" [ref=e139]:
+          - img "6y2xzVVA0lV1.png" [ref=e141]
+          - generic [ref=e142]:
+            - generic [ref=e143]: 6y2xzVVA0lV1.png
+            - generic [ref=e144]:
+              - generic [ref=e145]: image
+              - generic [ref=e146]: 2752×1536
+              - generic [ref=e147]: 8.7 MB
+        - button "ms1sRir0vJ2U.png ms1sRir0vJ2U.png image 2752×1536 9.0 MB" [ref=e148]:
+          - img "ms1sRir0vJ2U.png" [ref=e150]
+          - generic [ref=e151]:
+            - generic [ref=e152]: ms1sRir0vJ2U.png
+            - generic [ref=e153]:
+              - generic [ref=e154]: image
+              - generic [ref=e155]: 2752×1536
+              - generic [ref=e156]: 9.0 MB
+        - button "ms1sRir0vJ2U.png ms1sRir0vJ2U.png image 2752×1536 9.0 MB" [ref=e157]:
+          - img "ms1sRir0vJ2U.png" [ref=e159]
+          - generic [ref=e160]:
+            - generic [ref=e161]: ms1sRir0vJ2U.png
+            - generic [ref=e162]:
+              - generic [ref=e163]: image
+              - generic [ref=e164]: 2752×1536
+              - generic [ref=e165]: 9.0 MB
+        - button "6y2xzVVA0lV1.png 6y2xzVVA0lV1.png image 2752×1536 8.7 MB" [ref=e166]:
+          - img "6y2xzVVA0lV1.png" [ref=e168]
+          - generic [ref=e169]:
+            - generic [ref=e170]: 6y2xzVVA0lV1.png
+            - generic [ref=e171]:
+              - generic [ref=e172]: image
+              - generic [ref=e173]: 2752×1536
+              - generic [ref=e174]: 8.7 MB
+        - button "6y2xzVVA0lV1.png 6y2xzVVA0lV1.png image 2752×1536 8.7 MB" [ref=e175]:
+          - img "6y2xzVVA0lV1.png" [ref=e177]
+          - generic [ref=e178]:
+            - generic [ref=e179]: 6y2xzVVA0lV1.png
+            - generic [ref=e180]:
+              - generic [ref=e181]: image
+              - generic [ref=e182]: 2752×1536
+              - generic [ref=e183]: 8.7 MB
+        - button "jwyhGOFlJNf4.png jwyhGOFlJNf4.png image 2752×1536 8.7 MB" [ref=e184]:
+          - img "jwyhGOFlJNf4.png" [ref=e186]
+          - generic [ref=e187]:
+            - generic [ref=e188]: jwyhGOFlJNf4.png
+            - generic [ref=e189]:
+              - generic [ref=e190]: image
+              - generic [ref=e191]: 2752×1536
+              - generic [ref=e192]: 8.7 MB
+    - generic [ref=e193]:
+      - generic [ref=e194]:
+        - generic [ref=e197]:
+          - generic [ref=e198]:
+            - generic [ref=e200]: Source
+            - generic [ref=e201]: 00:00:00:00
+          - generic [ref=e202]:
+            - generic [ref=e204]: Select a clip to preview
+            - generic [ref=e205]:
+              - button "-" [ref=e206]
+              - generic [ref=e207]: 100%
+              - button "+" [ref=e208]
+              - button "Fit" [ref=e209]
+            - generic [ref=e210]:
+              - button "I" [ref=e211]
+              - button "⏮" [ref=e212]
+              - button "◀" [ref=e213]
+              - button "▶" [ref=e214]
+              - button "▶" [ref=e215]
+              - button "⏭" [ref=e216]
+              - button "O" [ref=e217]
+              - button "Clr" [ref=e218]
+              - button "Insert" [ref=e220]
+              - button "Overwrite" [ref=e221]
+          - generic [ref=e222]:
+            - generic [ref=e223]:
+              - generic [ref=e224]: Viewfinder
+              - generic [ref=e225]: 00:00:00:00
+            - generic [ref=e227]:
+              - textbox [ref=e228]: 00:00:00:00
+              - generic [ref=e229]: I/O + seek exact position
+              - generic [ref=e230]: "Mode: Overwrite"
+        - generic [ref=e234]:
+          - generic [ref=e235]:
+            - generic [ref=e236]: Program
+            - generic [ref=e237]: 00:00:00:00
+          - generic [ref=e238]:
+            - generic:
+              - generic: 00:00:00:00
+              - generic: "clip: bb47e1816e13"
+              - generic "Approximate frame render time": 0.2ms
+            - generic [ref=e240]:
+              - button "AutoKey" [ref=e241]
+              - button "Renderer Auto" [ref=e242]
+              - generic "Active renderer backend" [ref=e243]: GL2
+              - button "Mask" [ref=e244]
+              - button "Onion On" [ref=e245]
+              - button "+Mask" [ref=e246]
+              - button "-" [ref=e247]
+              - generic [ref=e248]: 100%
+              - button "+" [ref=e249]
+              - button "Fit" [ref=e250]
+            - generic [ref=e251]:
+              - button "|<" [ref=e252]
+              - button "<" [ref=e253]
+              - button "Play" [ref=e254]
+              - button ">" [ref=e255]
+              - button ">|" [ref=e256]
+              - button "I" [ref=e257]
+              - button "O" [ref=e258]
+              - button "Clr" [ref=e259]
+              - button "Lift" [disabled] [ref=e260]
+              - button "Extract" [disabled] [ref=e261]
+          - generic [ref=e262]:
+            - generic [ref=e263]:
+              - generic [ref=e264]: Viewfinder
+              - generic [ref=e265]: 00:00:00:00
+            - generic [ref=e268]:
+              - textbox [ref=e269]: 00:00:00:00
+              - generic [ref=e270]: Drag clip in viewer to move, corner to resize
+      - generic [ref=e273]:
+        - generic [ref=e274]:
+          - generic [ref=e275]:
+            - generic [ref=e276]: Timeline
+            - generic [ref=e277]: Sequence 1
+            - generic [ref=e278]: 24fps
+            - generic [ref=e279]:
+              - button "Timeline" [ref=e280]
+              - button "Graph" [active] [ref=e281]
+          - generic [ref=e282]:
+            - generic [ref=e283]:
+              - generic [ref=e794]: No clip selected
+              - generic [ref=e795]: Scale X
+            - generic [ref=e303]: 00:00:00:00
+        - generic [ref=e304]:
+          - generic [ref=e306]: Select one clip in the timeline to edit keyframes.
+          - complementary [ref=e796]:
+            - generic [ref=e797]:
+              - generic [ref=e800]: L
+              - generic [ref=e803]: R
+              - generic:
+                - generic: "0"
+                - generic: "-6"
+                - generic: "-12"
+                - generic: "-18"
+                - generic: "-24"
+                - generic: "-36"
+                - generic: "-48"
+    - complementary [ref=e413]:
+      - generic [ref=e414]:
+        - heading "Inspector" [level=2] [ref=e415]
+        - button "▶" [ref=e416]
+      - generic [ref=e804]: 1 clips selected
+  - contentinfo [ref=e21]:
+    - generic [ref=e22]:
+      - generic [ref=e23]: Ready
+      - generic [ref=e791]: 1 clip selected
+      - generic [ref=e24]: "Tool: Select"
+      - generic [ref=e25]: Linked
+    - generic [ref=e26]:
+      - generic [ref=e418]: 1920×1080 • 24fps
+      - generic [ref=e419]: 15 assets
+      - generic [ref=e27]: "Space: play • J/K/L: shuttle • ←/→: 1f • ↑/↓: cuts • Home/End • C/V • M/[ ]"

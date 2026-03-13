@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applyKeyframeEasing } from './keyframeEasing.js';
+import { applyKeyframeEasing, applySegmentKeyframeEasing } from './keyframeEasing.js';
 
 describe('applyKeyframeEasing', () => {
   it('applies classic easing curves', () => {
@@ -24,5 +24,29 @@ describe('applyKeyframeEasing', () => {
     expect(eased).toBeGreaterThan(0);
     expect(eased).toBeLessThan(1);
     expect(Math.abs(eased - t)).toBeGreaterThan(0.01);
+  });
+
+  it('lets the destination keyframe shape the incoming side of a segment', () => {
+    const t = 0.8;
+    const eased = applySegmentKeyframeEasing(t, 'linear', undefined, 'ease-in');
+    expect(eased).toBeGreaterThan(t);
+  });
+
+  it('uses both source out handle and destination in handle for bezier segments', () => {
+    const t = 0.75;
+    const easedFromSourceOnly = applySegmentKeyframeEasing(
+      t,
+      'bezier',
+      { outX: 0.1, outY: 0.9, inX: 0.7, inY: 0.2 },
+      'linear',
+    );
+    const easedWithDestination = applySegmentKeyframeEasing(
+      t,
+      'bezier',
+      { outX: 0.1, outY: 0.9, inX: 0.7, inY: 0.2 },
+      'bezier',
+      { outX: 0.2, outY: 0.8, inX: 0.95, inY: 0.2 },
+    );
+    expect(Math.abs(easedWithDestination - easedFromSourceOnly)).toBeGreaterThan(0.05);
   });
 });

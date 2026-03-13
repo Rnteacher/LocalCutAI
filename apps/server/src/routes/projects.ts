@@ -72,6 +72,18 @@ const updateProjectBodySchema = {
   },
 } as const;
 
+function normalizeManagedPath(targetPath: string): string {
+  const resolved = path.resolve(targetPath);
+  const normalized = path.normalize(resolved);
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isManagedProjectDir(projectDir: string): boolean {
+  const root = normalizeManagedPath(config.projectsDir);
+  const target = normalizeManagedPath(projectDir);
+  return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
 export const projectRoutes: FastifyPluginAsync = async (fastify) => {
   // GET / - List all projects
   fastify.get('/', async () => {
@@ -240,12 +252,38 @@ export const projectRoutes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ success: false, error: 'Project not found' });
       }
 
-      // CASCADE will delete media_assets, sequences, and jobs
-      db.transaction((tx) => {
-        tx.delete(projects).where(eq(projects.id, request.params.id)).run();
-      });
-      fastify.log.info({ projectDir: existing.projectDir }, 'Project deleted; directory preserved');
-      return { success: true };
+      let stagedProjectDir: string | null = null;
+      if (existing.projectDir && fs.existsSync(existing.projectDir) && isManagedProjectDir(existing.projectDir)) {
+        stagedProjectDir = `${existing.projectDir}.__deleting__${Date.now()}`;
+        fs.renameSync(existing.projectDir, stagedProjectDir);
+      }
+
+      try {
+        // CASCADE will delete media_assets, sequences, and jobs
+        db.transaction((tx) => {
+          tx.delete(projects).where(eq(projects.id, request.params.id)).run();
+        });
+      } catch (err) {
+        if (stagedProjectDir && fs.existsSync(stagedProjectDir) && !fs.existsSync(existing.projectDir)) {
+          fs.renameSync(stagedProjectDir, existing.projectDir);
+        }
+        throw err;
+      }
+
+      let warning: string | null = null;
+      if (stagedProjectDir && fs.existsSync(stagedProjectDir)) {
+        try {
+          fs.rmSync(stagedProjectDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+        } catch (err) {
+          warning = err instanceof Error ? err.message : 'Failed to remove project directory';
+          fastify.log.error({ err, projectDir: stagedProjectDir }, 'Project deleted but directory cleanup failed');
+        }
+      } else if (existing.projectDir && fs.existsSync(existing.projectDir) && !isManagedProjectDir(existing.projectDir)) {
+        warning = 'Project directory is outside the managed projects root and was preserved';
+        fastify.log.warn({ projectDir: existing.projectDir }, 'Project deleted but directory preserved');
+      }
+
+      return warning ? { success: true, warning } : { success: true };
     },
   );
 };

@@ -7,6 +7,7 @@ import { spawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { config } from '../config.js';
 import { getDb } from '../db/client.js';
 import { jobs, mediaAssets, sequences, projects } from '../db/schema.js';
@@ -110,6 +111,7 @@ interface StoredClipData {
   scaleX?: number;
   scaleY?: number;
   rotation?: number;
+  speed?: number;
 
   brightness?: number;
   contrast?: number;
@@ -204,10 +206,16 @@ interface VideoSegment {
   startFrame: number;
   endFrame: number;
   sourceStartFrame: number;
+  sourceEndFrame: number;
   clipLocalStartFrame: number;
   opacity: number;
   blendMode: BlendMode;
   silhouetteGamma: number;
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  hue: number;
+  vignette: number;
   masks: ClipItem['masks'];
   positionX: number;
   positionY: number;
@@ -223,14 +231,24 @@ interface AudioSegment {
   startFrame: number;
   endFrame: number;
   sourceStartFrame: number;
+  sourceEndFrame: number;
   gain: number;
   panLeft: number;
   panRight: number;
 }
 
+interface PreparedFfmpegArgs {
+  args: string[];
+  cleanup: () => void;
+  scriptPath?: string;
+}
+
 const activeProcesses = new Map<string, ChildProcess>();
 type ProgressCallback = (jobId: string, progress: number, status: string) => void;
 const ANIMATION_EPSILON = 1e-6;
+const SOURCE_FRAME_EPSILON = 1e-4;
+const FILTER_COMPLEX_GRAPH_SCRIPT_THRESHOLD = 12000;
+const FFMPEG_COMMAND_LINE_THRESHOLD = 25000;
 
 export async function startExport(
   params: ExportParams,
@@ -322,15 +340,17 @@ async function runExport(
   onProgress?: ProgressCallback,
 ): Promise<void> {
   const db = getDb();
+  const initialProgress = 0.01;
 
   db.update(jobs)
     .set({
       status: 'running',
+      progress: initialProgress,
       startedAt: new Date().toISOString(),
     })
     .where(eq(jobs.id, jobId))
     .run();
-  onProgress?.(jobId, 0, 'running');
+  onProgress?.(jobId, initialProgress, 'running');
 
   const sequence = adaptStoredSequenceToCore(seqRow, seqData);
   const storedMeta = buildStoredExportMeta(seqData);
@@ -349,41 +369,100 @@ async function runExport(
     storedMeta,
     mediaInputs.dimensionsById,
   );
+  const preparedFfmpegArgs = prepareFfmpegArgsForSpawn(jobId, ffmpegArgs);
 
   await new Promise<void>((resolve, reject) => {
-    const proc = spawn(config.ffmpeg.ffmpegPath, ffmpegArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    let cleanedUp = false;
+    const cleanupPreparedArgs = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
+      preparedFfmpegArgs.cleanup();
+    };
+
+    let proc: ChildProcess;
+    try {
+      proc = spawn(config.ffmpeg.ffmpegPath, preparedFfmpegArgs.args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      cleanupPreparedArgs();
+      reject(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
 
     activeProcesses.set(jobId, proc);
 
     let stderr = '';
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-      const timeLine = chunk.toString().match(/time=(\d+):(\d+):(\d+)\.(\d+)/);
-      if (!timeLine || totalDurationSec <= 0) return;
+    let progressBuffer = '';
+    let lastProgress = initialProgress;
+    let sawRealProgress = false;
+    const progressStartMs = Date.now();
+    const syntheticProgressTimer = setInterval(() => {
+      if (sawRealProgress) return;
+      const elapsedSec = (Date.now() - progressStartMs) / 1000;
+      // Keep a small visible ramp while FFmpeg is still parsing/building filters.
+      const synthetic = Math.min(0.08, 0.01 + elapsedSec * 0.002);
+      if (synthetic <= lastProgress + 0.0005) return;
+      lastProgress = synthetic;
+      db.update(jobs).set({ progress: synthetic }).where(eq(jobs.id, jobId)).run();
+      onProgress?.(jobId, synthetic, 'running');
+    }, 1000);
 
-      const hours = parseInt(timeLine[1], 10);
-      const minutes = parseInt(timeLine[2], 10);
-      const seconds = parseInt(timeLine[3], 10);
-      const hundredths = parseInt(timeLine[4], 10);
-      const currentTime = hours * 3600 + minutes * 60 + seconds + hundredths / 100;
-      const progress = Math.min(currentTime / totalDurationSec, 0.99);
+    const clearSyntheticProgressTimer = () => {
+      clearInterval(syntheticProgressTimer);
+    };
 
+    const updateProgressFromTime = (seconds: number): void => {
+      if (!Number.isFinite(seconds) || totalDurationSec <= 0) return;
+      sawRealProgress = true;
+      const progress = Math.min(seconds / totalDurationSec, 0.99);
+      if (progress <= lastProgress + 0.0005) return;
+      lastProgress = progress;
       db.update(jobs).set({ progress }).where(eq(jobs.id, jobId)).run();
       onProgress?.(jobId, progress, 'running');
+    };
+
+    const ingestProgressText = (chunkText: string): void => {
+      if (totalDurationSec <= 0) return;
+      progressBuffer += chunkText.replace(/\r/g, '\n');
+      const lines = progressBuffer.split('\n');
+      progressBuffer = lines.pop() ?? '';
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        if (line === 'progress=end') {
+          updateProgressFromTime(totalDurationSec);
+          continue;
+        }
+        const parsedSeconds = parseFfmpegProgressTime(line);
+        if (parsedSeconds != null) {
+          updateProgressFromTime(parsedSeconds);
+        }
+      }
+    };
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      const chunkText = chunk.toString();
+      stderr += chunkText;
+      ingestProgressText(chunkText);
+    });
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      ingestProgressText(chunk.toString());
     });
 
     proc.on('close', (code) => {
       activeProcesses.delete(jobId);
+      clearSyntheticProgressTimer();
       const currentJob = db.select().from(jobs).where(eq(jobs.id, jobId)).get();
       if (currentJob?.status === 'cancelled') {
+        cleanupPreparedArgs();
         onProgress?.(jobId, currentJob.progress ?? 0, 'cancelled');
         resolve();
         return;
       }
 
       if (code === 0) {
+        cleanupPreparedArgs();
         db.update(jobs)
           .set({
             status: 'completed',
@@ -400,9 +479,12 @@ async function runExport(
       const lastLines = stderr
         .split('\n')
         .filter((l) => l.trim())
-        .slice(-5)
+        .slice(-20)
         .join('\n');
-      const errMsg = `FFmpeg exited with code ${code}: ${lastLines}`;
+      const debugScriptPath = preparedFfmpegArgs.scriptPath;
+      const errMsg =
+        `FFmpeg exited with code ${code}: ${lastLines}` +
+        (debugScriptPath ? `\nFilter script saved at: ${debugScriptPath}` : '');
       db.update(jobs)
         .set({
           status: 'failed',
@@ -412,11 +494,16 @@ async function runExport(
         .where(eq(jobs.id, jobId))
         .run();
       onProgress?.(jobId, 0, 'failed');
+      if (!debugScriptPath) {
+        cleanupPreparedArgs();
+      }
       reject(new Error(errMsg));
     });
 
     proc.on('error', (err) => {
       activeProcesses.delete(jobId);
+      clearSyntheticProgressTimer();
+      cleanupPreparedArgs();
       const currentJob = db.select().from(jobs).where(eq(jobs.id, jobId)).get();
       if (currentJob?.status === 'cancelled') {
         onProgress?.(jobId, currentJob.progress ?? 0, 'cancelled');
@@ -471,6 +558,9 @@ function buildFFmpegArgs(
   if (videoSegments.length === 0 && audioSegments.length === 0) {
     return [
       '-y',
+      '-progress',
+      'pipe:2',
+      '-nostats',
       '-f',
       'lavfi',
       '-i',
@@ -496,7 +586,7 @@ function buildFFmpegArgs(
     );
   }
 
-  const args: string[] = ['-y'];
+  const args: string[] = ['-y', '-progress', 'pipe:2', '-nostats'];
   for (const file of inputFiles) {
     args.push('-i', file);
   }
@@ -515,7 +605,16 @@ function buildFFmpegArgs(
 
     const startSec = framesToSeconds(seg.startFrame, sequence.frameRate);
     const durSec = framesToSeconds(seg.endFrame - seg.startFrame, sequence.frameRate);
-    const inSec = framesToSeconds(seg.sourceStartFrame, sequence.frameRate);
+    const sourceDeltaFrames = seg.sourceEndFrame - seg.sourceStartFrame;
+    const sourceDurSecRaw = Math.abs(framesToSeconds(sourceDeltaFrames, sequence.frameRate));
+    const sourceDurSec = Math.max(1e-6, sourceDurSecRaw);
+    const sourceStartForTrim = sourceDeltaFrames >= 0 ? seg.sourceStartFrame : seg.sourceEndFrame;
+    const inSec = framesToSeconds(sourceStartForTrim, sequence.frameRate);
+    const reverseVideo = sourceDeltaFrames < -SOURCE_FRAME_EPSILON;
+    const setptsScale = Math.max(1e-6, durSec / sourceDurSec);
+    const setptsScaleChain =
+      Math.abs(setptsScale - 1) > 0.0005 ? `,setpts=${setptsScale.toFixed(10)}*PTS` : '';
+    const reverseChain = reverseVideo ? ',reverse' : '';
     const vLabel = `v${i}`;
     const ovLabel = `ov${i}`;
     const scaleX = Math.max(0.01, seg.scaleX);
@@ -523,8 +622,7 @@ function buildFFmpegArgs(
     const rotationRad = (seg.rotation * Math.PI) / 180;
     const overlayX = `(W-w)/2+${seg.positionX.toFixed(3)}`;
     const overlayY = `(H-h)/2+${seg.positionY.toFixed(3)}`;
-    const clipMeta = storedMeta?.clipById.get(seg.clipId);
-    const colorFilterChain = buildVideoColorFilterChain(clipMeta);
+    const colorFilterChain = buildVideoColorFilterChain(seg);
     const blendMode = seg.blendMode ?? 'normal';
     const clipForMask = clipById.get(seg.clipId);
 
@@ -542,7 +640,8 @@ function buildFFmpegArgs(
       const inputIndex = registerInput(seg.mediaAssetId);
       if (inputIndex == null) continue;
       filterParts.push(
-        `[${inputIndex}:v]trim=start=${inSec}:duration=${durSec},setpts=PTS-STARTPTS,` +
+        `[${inputIndex}:v]trim=start=${inSec}:duration=${sourceDurSec},setpts=PTS-STARTPTS` +
+          `${reverseChain}${setptsScaleChain},` +
           `scale='if(gt(a,${width}/${height}),${width},-2)':'if(gt(a,${width}/${height}),-2,${height})',` +
           `setsar=1,` +
           `${colorFilterChain}` +
@@ -594,32 +693,61 @@ function buildFFmpegArgs(
         sequence.resolution,
       );
       if (maskEval.expression) {
-        const maskBaseLabel = `maskbase${i}`;
-        const maskLabel =
-          maskEval.blurSigma > 0.05 ? `maskblur${i}` : maskBaseLabel;
+        const maskExprLabel = `maskexpr${i}`;
+        const maskStillLabel = `maskstill${i}`;
+        const maskBlurStillLabel = `maskbstill${i}`;
+        const maskLoopSourceLabel =
+          maskEval.blurSigma > 0.05 ? maskBlurStillLabel : maskExprLabel;
+        const ptsFps = Math.max(0.000001, fps);
+        const maskSrcLabel = `masksrc${i}`;
+        const alphaBranchLabel = `abranch${i}`;
+        const rgbBranchLabel = `rbranch${i}`;
         const alphaSrcLabel = `asrc${i}`;
+        const alphaRefLabel = `aref${i}`;
         const alphaMulLabel = `amul${i}`;
+        const alphaGrayLabel = `agray${i}`;
+        const maskScaleRefLabel = `msref${i}`;
+        const maskBlendLabel = `mblend${i}`;
         const rgbSrcLabel = `rgbsrc${i}`;
+        const rgbScaleRefLabel = `rsref${i}`;
+        const rgbMergeBaseLabel = `rmerge${i}`;
+        const alphaMergeLabel = `amrg${i}`;
         const maskedLabel = `vm${i}`;
         filterParts.push(
-          `[${vLabel}]format=gray,geq=lum='255*${escapeFfmpegExpression(maskEval.expression)}'[${maskBaseLabel}]`,
+          `[${vLabel}]split=3[${maskSrcLabel}][${alphaBranchLabel}][${rgbBranchLabel}]`,
+        );
+        filterParts.push(
+          `[${maskSrcLabel}]trim=end_frame=1,format=gray,geq=lum='255*${escapeFfmpegExpression(maskEval.expression)}'[${maskExprLabel}]`,
         );
         if (maskEval.blurSigma > 0.05) {
           filterParts.push(
-            `[${maskBaseLabel}]gblur=sigma=${Math.min(128, maskEval.blurSigma).toFixed(4)}[${maskLabel}]`,
+            `[${maskExprLabel}]gblur=sigma=${Math.min(128, maskEval.blurSigma).toFixed(4)}[${maskBlurStillLabel}]`,
           );
         }
-        filterParts.push(`[${vLabel}]alphaextract[${alphaSrcLabel}]`);
-        filterParts.push(`[${alphaSrcLabel}][${maskLabel}]blend=all_mode=multiply[${alphaMulLabel}]`);
-        filterParts.push(`[${vLabel}]format=rgba[${rgbSrcLabel}]`);
-        filterParts.push(`[${rgbSrcLabel}][${alphaMulLabel}]alphamerge[${maskedLabel}]`);
+        filterParts.push(
+          `[${maskLoopSourceLabel}]loop=loop=-1:size=1:start=0,setpts=N/${ptsFps.toFixed(6)}/TB,trim=duration=${durSec}[${maskStillLabel}]`,
+        );
+        filterParts.push(`[${maskStillLabel}]split=2[${maskScaleRefLabel}][${maskBlendLabel}]`);
+        filterParts.push(`[${alphaBranchLabel}]format=rgba,alphaextract[${alphaSrcLabel}]`);
+        filterParts.push(`[${alphaSrcLabel}][${maskScaleRefLabel}]scale=w=rw:h=rh[${alphaRefLabel}]`);
+        filterParts.push(`[${alphaRefLabel}][${maskBlendLabel}]blend=all_mode=multiply[${alphaMulLabel}]`);
+        filterParts.push(`[${alphaMulLabel}]format=gray[${alphaGrayLabel}]`);
+        filterParts.push(`[${rgbBranchLabel}]format=rgba[${rgbSrcLabel}]`);
+        filterParts.push(`[${rgbSrcLabel}]split=2[${rgbScaleRefLabel}][${rgbMergeBaseLabel}]`);
+        filterParts.push(`[${alphaGrayLabel}][${rgbScaleRefLabel}]scale=w=rw:h=rh[${alphaMergeLabel}]`);
+        filterParts.push(`[${rgbMergeBaseLabel}][${alphaMergeLabel}]alphamerge[${maskedLabel}]`);
         segmentVisualLabel = maskedLabel;
       }
     }
 
+    const timedSegmentLabel = `vts${i}`;
+    filterParts.push(
+      `[${segmentVisualLabel}]setpts=PTS-STARTPTS+${startSec}/TB[${timedSegmentLabel}]`,
+    );
+
     if (blendMode === 'normal') {
       filterParts.push(
-        `[${composeBase}][${segmentVisualLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${ovLabel}]`,
+        `[${composeBase}][${timedSegmentLabel}]overlay=x='${overlayX}':y='${overlayY}':eof_action=pass[${ovLabel}]`,
       );
     } else {
       const segBase = `segbase${i}`;
@@ -627,15 +755,19 @@ function buildFFmpegArgs(
 
       filterParts.push(`color=c=black@0:s=${width}x${height}:r=${fps}:d=${totalDurationSec}[${segBase}]`);
       filterParts.push(
-        `[${segBase}][${segmentVisualLabel}]overlay=x='${overlayX}':y='${overlayY}':enable='between(t,${startSec},${startSec + durSec})':eof_action=pass[${segPos}]`,
+        `[${segBase}][${timedSegmentLabel}]overlay=x='${overlayX}':y='${overlayY}':eof_action=pass[${segPos}]`,
       );
 
       if (blendMode === 'silhouette-alpha' || blendMode === 'silhouette-luma') {
         const maskLabel = `mask${i}`;
         const maskInvLabel = `maski${i}`;
         const baseAlphaLabel = `basea${i}`;
+        const baseAlphaRefLabel = `baref${i}`;
+        const baseAlphaMergeLabel = `bamerge${i}`;
+        const maskAlignedLabel = `maskal${i}`;
+        const maskGrayLabel = `maskg${i}`;
         if (blendMode === 'silhouette-alpha') {
-          filterParts.push(`[${segPos}]alphaextract[${maskLabel}]`);
+          filterParts.push(`[${segPos}]format=rgba,alphaextract[${maskLabel}]`);
         } else {
           const gamma = clampRange(seg.silhouetteGamma ?? 1, 0.1, 8);
           filterParts.push(
@@ -644,7 +776,10 @@ function buildFFmpegArgs(
         }
         filterParts.push(`[${maskLabel}]negate[${maskInvLabel}]`);
         filterParts.push(`[${composeBase}]format=rgba[${baseAlphaLabel}]`);
-        filterParts.push(`[${baseAlphaLabel}][${maskInvLabel}]alphamerge[${ovLabel}]`);
+        filterParts.push(`[${baseAlphaLabel}]split=2[${baseAlphaRefLabel}][${baseAlphaMergeLabel}]`);
+        filterParts.push(`[${maskInvLabel}][${baseAlphaRefLabel}]scale=w=rw:h=rh[${maskAlignedLabel}]`);
+        filterParts.push(`[${maskAlignedLabel}]format=gray[${maskGrayLabel}]`);
+        filterParts.push(`[${baseAlphaMergeLabel}][${maskGrayLabel}]alphamerge[${ovLabel}]`);
       } else {
         const ffBlendMode =
           blendMode === 'add'
@@ -654,7 +789,12 @@ function buildFFmpegArgs(
               : blendMode === 'screen'
                 ? 'screen'
                 : 'overlay';
-        filterParts.push(`[${composeBase}][${segPos}]blend=all_mode=${ffBlendMode}[${ovLabel}]`);
+        const segRefLabel = `sref${i}`;
+        const composeScaleRefLabel = `csref${i}`;
+        const composeBlendLabel = `cblend${i}`;
+        filterParts.push(`[${composeBase}]split=2[${composeScaleRefLabel}][${composeBlendLabel}]`);
+        filterParts.push(`[${segPos}][${composeScaleRefLabel}]scale=w=rw:h=rh[${segRefLabel}]`);
+        filterParts.push(`[${composeBlendLabel}][${segRefLabel}]blend=all_mode=${ffBlendMode}[${ovLabel}]`);
       }
     }
 
@@ -669,7 +809,15 @@ function buildFFmpegArgs(
 
     const startSec = framesToSeconds(seg.startFrame, sequence.frameRate);
     const durSec = framesToSeconds(seg.endFrame - seg.startFrame, sequence.frameRate);
-    const inSec = framesToSeconds(seg.sourceStartFrame, sequence.frameRate);
+    const sourceDeltaFrames = seg.sourceEndFrame - seg.sourceStartFrame;
+    const sourceDurSecRaw = Math.abs(framesToSeconds(sourceDeltaFrames, sequence.frameRate));
+    const sourceDurSec = Math.max(1e-6, sourceDurSecRaw);
+    const sourceStartForTrim = sourceDeltaFrames >= 0 ? seg.sourceStartFrame : seg.sourceEndFrame;
+    const inSec = framesToSeconds(sourceStartForTrim, sequence.frameRate);
+    const reverseAudioChain = sourceDeltaFrames < -SOURCE_FRAME_EPSILON ? ',areverse' : '';
+    const tempoFactor = Math.max(0.01, sourceDurSec / Math.max(1e-6, durSec));
+    const atempoChain = buildAtempoChain(tempoFactor);
+    const tempoChain = atempoChain.length > 0 ? `,${atempoChain}` : '';
     const delayMs = Math.max(0, Math.round(startSec * 1000));
     const gain = Math.max(0, seg.gain);
     const left = seg.panLeft.toFixed(4);
@@ -681,20 +829,28 @@ function buildFFmpegArgs(
     const panExpr = buildAudioPanExpression(channelMode, channelMap, left, right);
 
     filterParts.push(
-      `[${inputIndex}:a]atrim=start=${inSec}:duration=${durSec},asetpts=PTS-STARTPTS,` +
+      `[${inputIndex}:a]atrim=start=${inSec}:duration=${sourceDurSec},asetpts=PTS-STARTPTS` +
+        `${reverseAudioChain}${tempoChain},` +
         `aformat=channel_layouts=stereo,${panExpr},` +
         `volume=${gain.toFixed(6)},adelay=${delayMs}|${delayMs}[${aLabel}]`,
     );
     audioLabels.push(`[${aLabel}]`);
   }
 
+  const sampleRate = params.audioSampleRate || 48000;
+  const silenceLabel = 'asilence';
+  const silenceDuration = Math.max(0.1, totalDurationSec);
+  filterParts.push(
+    `anullsrc=r=${sampleRate}:cl=stereo,atrim=duration=${silenceDuration.toFixed(6)},asetpts=PTS-STARTPTS[${silenceLabel}]`,
+  );
+
   if (audioLabels.length === 0) {
-    filterParts.push(`anullsrc=r=${params.audioSampleRate || 48000}:cl=stereo[aout]`);
-  } else if (audioLabels.length === 1) {
-    filterParts.push(`${audioLabels[0]}acopy[aout]`);
+    filterParts.push(`[${silenceLabel}]acopy[aout]`);
   } else {
+    const inputCount = audioLabels.length + 1;
+    const weights = ['0', ...new Array(audioLabels.length).fill('1')].join(' ');
     filterParts.push(
-      `${audioLabels.join('')}amix=inputs=${audioLabels.length}:duration=longest:dropout_transition=0[aout]`,
+      `[${silenceLabel}]${audioLabels.join('')}amix=inputs=${inputCount}:duration=longest:dropout_transition=0:normalize=0:weights='${weights}'[aout]`,
     );
   }
 
@@ -715,6 +871,63 @@ function buildFFmpegArgs(
   args.push('-t', totalDurationSec.toString());
   args.push(outputPath);
   return args;
+}
+
+function prepareFfmpegArgsForSpawn(jobId: string, args: string[]): PreparedFfmpegArgs {
+  const filterFlagIndex = args.indexOf('-filter_complex');
+  const filterValueIndex = filterFlagIndex + 1;
+  if (
+    filterFlagIndex < 0 ||
+    filterValueIndex >= args.length ||
+    typeof args[filterValueIndex] !== 'string'
+  ) {
+    return {
+      args,
+      cleanup: () => {},
+    };
+  }
+
+  const filterGraph = args[filterValueIndex];
+  const estimatedCommandLength =
+    config.ffmpeg.ffmpegPath.length +
+    args.reduce((sum, part) => sum + part.length + 3, 0);
+  const shouldUseScript =
+    filterGraph.length >= FILTER_COMPLEX_GRAPH_SCRIPT_THRESHOLD ||
+    estimatedCommandLength >= FFMPEG_COMMAND_LINE_THRESHOLD;
+
+  if (!shouldUseScript) {
+    return {
+      args,
+      cleanup: () => {},
+    };
+  }
+
+  const scriptDir = path.join(os.tmpdir(), 'localcut', 'ffmpeg-filter-scripts');
+  fs.mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = path.join(
+    scriptDir,
+    `${jobId}-${Date.now()}-${nanoid(6)}.ffscript`,
+  );
+  fs.writeFileSync(scriptPath, filterGraph, 'utf8');
+
+  const nextArgs = [
+    ...args.slice(0, filterFlagIndex),
+    '-filter_complex_script',
+    scriptPath,
+    ...args.slice(filterValueIndex + 1),
+  ];
+
+  return {
+    args: nextArgs,
+    scriptPath,
+    cleanup: () => {
+      try {
+        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+      } catch {
+        // Best-effort cleanup.
+      }
+    },
+  };
 }
 
 function keyframesAreAnimated(
@@ -780,6 +993,66 @@ function maskShapeKeyframesAreAnimated(keyframes: ClipItem['masks'][number]['key
     }
   }
   return false;
+}
+
+function localTimeValueForClip(clip: ClipItem, localFrame: number): TimeValue {
+  return {
+    frames: localFrame,
+    rate: clip.startTime.rate,
+  };
+}
+
+function resolveClipSourceFrameAtLocalFrame(clip: ClipItem, localFrame: number): number {
+  const sourceIn = clip.sourceInPoint.frames;
+  const sourceOut = Math.max(sourceIn + 1, clip.sourceOutPoint.frames);
+
+  const speedAtStart = getPropertyValue(clip, 'speed', localTimeValueForClip(clip, 0));
+  const sourceOrigin = speedAtStart >= 0 ? sourceIn : sourceOut - 1;
+
+  if (Math.abs(localFrame) <= ANIMATION_EPSILON) {
+    return Math.max(0, sourceOrigin);
+  }
+
+  const sampleCount = Math.max(1, Math.min(640, Math.ceil(Math.abs(localFrame) / 2)));
+  const step = localFrame / sampleCount;
+  let integratedSourceFrames = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const sampleLocal = (i + 0.5) * step;
+    const speed = getPropertyValue(clip, 'speed', localTimeValueForClip(clip, sampleLocal));
+    integratedSourceFrames += speed * step;
+  }
+
+  return Math.max(0, sourceOrigin + integratedSourceFrames);
+}
+
+function resolveClipColorStateAtLocalFrame(
+  clip: ClipItem | undefined,
+  clipLocalFrame: number,
+): {
+  brightness: number;
+  contrast: number;
+  saturation: number;
+  hue: number;
+  vignette: number;
+} {
+  if (!clip) {
+    return {
+      brightness: 1,
+      contrast: 1,
+      saturation: 1,
+      hue: 0,
+      vignette: 0,
+    };
+  }
+
+  const localTime = localTimeValueForClip(clip, clipLocalFrame);
+  return {
+    brightness: clampRange(getPropertyValue(clip, 'brightness', localTime), 0, 2),
+    contrast: clampRange(getPropertyValue(clip, 'contrast', localTime), 0, 3),
+    saturation: clampRange(getPropertyValue(clip, 'saturation', localTime), 0, 3),
+    hue: clampRange(getPropertyValue(clip, 'hue', localTime), -180, 180),
+    vignette: clampRange(getPropertyValue(clip, 'vignette', localTime), -1, 1),
+  };
 }
 
 function extractSegments(sequence: Sequence): {
@@ -868,14 +1141,15 @@ function extractSegments(sequence: Sequence): {
       sequentialSourceFrame: number | null,
     ): void => {
       const prev = lastVideoByKey.get(key);
-      const expectedSourceFrame = prev
-        ? prev.sourceStartFrame + (prev.endFrame - prev.startFrame)
-        : -1;
+      const expectedSourceFrame = prev ? prev.sourceEndFrame : Number.NaN;
       const isSequentialSource =
-        sequentialSourceFrame == null || expectedSourceFrame === sequentialSourceFrame;
+        sequentialSourceFrame == null ||
+        (Number.isFinite(expectedSourceFrame) &&
+          Math.abs(expectedSourceFrame - sequentialSourceFrame) <= SOURCE_FRAME_EPSILON);
 
       if (prev && prev.endFrame === frameStart && isSequentialSource) {
         prev.endFrame = frameEnd;
+        prev.sourceEndFrame = seg.sourceEndFrame;
         return;
       }
 
@@ -905,7 +1179,22 @@ function extractSegments(sequence: Sequence): {
       const rotation = round3(layer.transform.rotation);
       const blendMode = layer.blendMode;
       const silhouetteGamma = clampRange(clip?.blendParams?.silhouetteGamma ?? 1, 0.1, 8);
-      const clipLocalStartFrame = clip ? Math.max(0, frameStart - clip.startTime.frames) : 0;
+      const clipLocalStartRaw = clip ? frameStart - clip.startTime.frames : 0;
+      const clipLocalEndRaw = clip ? frameEnd - clip.startTime.frames : clipLocalStartRaw;
+      const clipLocalStartFrame = Math.max(0, Math.round(clipLocalStartRaw));
+      const sourceStartFrame =
+        layer.mediaAssetId && clip
+          ? resolveClipSourceFrameAtLocalFrame(clip, clipLocalStartRaw)
+          : 0;
+      const sourceEndFrame =
+        layer.mediaAssetId && clip
+          ? resolveClipSourceFrameAtLocalFrame(clip, clipLocalEndRaw)
+          : 0;
+      const sourceRate =
+        layer.mediaAssetId && frameEnd > frameStart
+          ? (sourceEndFrame - sourceStartFrame) / (frameEnd - frameStart)
+          : 0;
+      const colorState = resolveClipColorStateAtLocalFrame(clip, clipLocalStartRaw);
       const hasAnimatedMaskShape = (clip?.masks ?? []).some((mask) =>
         maskShapeKeyframesAreAnimated(mask.keyframes ?? []),
       );
@@ -938,6 +1227,12 @@ function extractSegments(sequence: Sequence): {
           scaleX.toFixed(4),
           scaleY.toFixed(4),
           rotation.toFixed(3),
+          sourceRate.toFixed(5),
+          colorState.brightness.toFixed(4),
+          colorState.contrast.toFixed(4),
+          colorState.saturation.toFixed(4),
+          colorState.hue.toFixed(3),
+          colorState.vignette.toFixed(4),
         ].join('|');
 
         mergeVideoSegment(
@@ -950,11 +1245,17 @@ function extractSegments(sequence: Sequence): {
             z,
             startFrame: frameStart,
             endFrame: frameEnd,
-            sourceStartFrame: layer.mediaAssetId ? layer.sourceTime.frames : 0,
+            sourceStartFrame,
+            sourceEndFrame,
             clipLocalStartFrame,
             opacity,
             blendMode,
             silhouetteGamma,
+            brightness: colorState.brightness,
+            contrast: colorState.contrast,
+            saturation: colorState.saturation,
+            hue: colorState.hue,
+            vignette: colorState.vignette,
             masks: clip?.masks ?? [],
             positionX,
             positionY,
@@ -962,7 +1263,7 @@ function extractSegments(sequence: Sequence): {
             scaleY,
             rotation,
           },
-          layer.mediaAssetId ? layer.sourceTime.frames : null,
+          layer.mediaAssetId ? sourceStartFrame : null,
         );
       }
 
@@ -993,10 +1294,16 @@ function extractSegments(sequence: Sequence): {
             startFrame: frameStart,
             endFrame: frameEnd,
             sourceStartFrame: 0,
+            sourceEndFrame: 0,
             clipLocalStartFrame,
             opacity: fadeOpacity,
             blendMode: 'normal',
             silhouetteGamma: 1,
+            brightness: colorState.brightness,
+            contrast: colorState.contrast,
+            saturation: colorState.saturation,
+            hue: colorState.hue,
+            vignette: colorState.vignette,
             masks: clip?.masks ?? [],
             positionX,
             positionY,
@@ -1011,6 +1318,17 @@ function extractSegments(sequence: Sequence): {
 
     for (const source of plan.audioSources) {
       if (!source.mediaAssetId) continue;
+      const clip = clipById.get(source.clipId);
+      const clipLocalStartRaw = clip ? frameStart - clip.startTime.frames : 0;
+      const clipLocalEndRaw = clip ? frameEnd - clip.startTime.frames : clipLocalStartRaw;
+      const sourceStartFrame = clip
+        ? resolveClipSourceFrameAtLocalFrame(clip, clipLocalStartRaw)
+        : source.sourceTime.frames;
+      const sourceEndFrame = clip
+        ? resolveClipSourceFrameAtLocalFrame(clip, clipLocalEndRaw)
+        : sourceStartFrame;
+      const sourceRate =
+        frameEnd > frameStart ? (sourceEndFrame - sourceStartFrame) / (frameEnd - frameStart) : 0;
       const transitionGain = resolveTransitionAudioGain(
         source.transitionType,
         source.transitionProgress,
@@ -1025,19 +1343,20 @@ function extractSegments(sequence: Sequence): {
         gain.toFixed(4),
         source.pan.left.toFixed(4),
         source.pan.right.toFixed(4),
+        sourceRate.toFixed(5),
       ].join('|');
 
       const prev = lastAudioByKey.get(key);
-      const expectedSourceFrame = prev
-        ? prev.sourceStartFrame + (prev.endFrame - prev.startFrame)
-        : -1;
+      const expectedSourceFrame = prev ? prev.sourceEndFrame : Number.NaN;
 
       if (
         prev &&
         prev.endFrame === frameStart &&
-        expectedSourceFrame === source.sourceTime.frames
+        Number.isFinite(expectedSourceFrame) &&
+        Math.abs(expectedSourceFrame - sourceStartFrame) <= SOURCE_FRAME_EPSILON
       ) {
         prev.endFrame = frameEnd;
+        prev.sourceEndFrame = sourceEndFrame;
       } else {
         const seg: AudioSegment = {
           clipId: source.clipId,
@@ -1045,7 +1364,8 @@ function extractSegments(sequence: Sequence): {
           mediaAssetId: source.mediaAssetId,
           startFrame: frameStart,
           endFrame: frameEnd,
-          sourceStartFrame: source.sourceTime.frames,
+          sourceStartFrame,
+          sourceEndFrame,
           gain,
           panLeft: source.pan.left,
           panRight: source.pan.right,
@@ -1340,6 +1660,44 @@ function escapeFfmpegExpression(value: string): string {
     .replace(/,/g, '\\,');
 }
 
+function parseFfmpegProgressTime(line: string): number | null {
+  const outTimeMicros = line.match(/^out_time_(?:ms|us)=(\d+)$/);
+  if (outTimeMicros) {
+    const micros = parseInt(outTimeMicros[1], 10);
+    if (Number.isFinite(micros) && micros >= 0) {
+      return micros / 1_000_000;
+    }
+    return null;
+  }
+
+  const outTime = line.match(/^out_time=(\d+):(\d+):(\d+)(?:\.(\d+))?$/);
+  if (outTime) {
+    const hours = parseInt(outTime[1], 10);
+    const minutes = parseInt(outTime[2], 10);
+    const seconds = parseInt(outTime[3], 10);
+    const fractionRaw = outTime[4] ?? '0';
+    const fraction = parseInt(fractionRaw, 10) / 10 ** fractionRaw.length;
+    if ([hours, minutes, seconds].every((v) => Number.isFinite(v) && v >= 0)) {
+      return hours * 3600 + minutes * 60 + seconds + fraction;
+    }
+    return null;
+  }
+
+  const statsTime = line.match(/time=(\d+):(\d+):(\d+)(?:\.(\d+))?/);
+  if (statsTime) {
+    const hours = parseInt(statsTime[1], 10);
+    const minutes = parseInt(statsTime[2], 10);
+    const seconds = parseInt(statsTime[3], 10);
+    const fractionRaw = statsTime[4] ?? '0';
+    const fraction = parseInt(fractionRaw, 10) / 10 ** fractionRaw.length;
+    if ([hours, minutes, seconds].every((v) => Number.isFinite(v) && v >= 0)) {
+      return hours * 3600 + minutes * 60 + seconds + fraction;
+    }
+  }
+
+  return null;
+}
+
 function adaptStoredSequenceToCore(
   seqRow: typeof sequences.$inferSelect,
   seqData: StoredSequenceData,
@@ -1567,6 +1925,7 @@ function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameR
       volume,
       pan,
       audioEnvelope: [],
+      speed: clip.speed ?? 1,
       transform: {
         positionX: clip.positionX ?? 0,
         positionY: clip.positionY ?? 0,
@@ -1577,6 +1936,11 @@ function adaptStoredClips(trackId: string, clips: StoredClipData[], rate: FrameR
         anchorY: 0.5,
       },
       opacity: clip.opacity ?? 1,
+      brightness: clip.brightness ?? 1,
+      contrast: clip.contrast ?? 1,
+      saturation: clip.saturation ?? 1,
+      hue: clip.hue ?? 0,
+      vignette: clip.vignette ?? 0,
       blendMode: clip.blendMode ?? 'normal',
       blendParams: {
         silhouetteGamma: clip.blendParams?.silhouetteGamma ?? 1,
@@ -1621,14 +1985,20 @@ function buildStoredExportMeta(seqData: StoredSequenceData): StoredExportMeta {
   return { clipById, trackAudioById };
 }
 
-function buildVideoColorFilterChain(clip?: StoredClipData): string {
-  if (!clip) return '';
+function buildVideoColorFilterChain(color?: {
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  hue?: number;
+  vignette?: number;
+}): string {
+  if (!color) return '';
 
-  const brightness = clampRange(clip.brightness ?? 1, 0, 2);
-  const contrast = clampRange(clip.contrast ?? 1, 0, 3);
-  const saturation = clampRange(clip.saturation ?? 1, 0, 3);
-  const hue = clampRange(clip.hue ?? 0, -180, 180);
-  const vignette = clampRange(clip.vignette ?? 0, -1, 1);
+  const brightness = clampRange(color.brightness ?? 1, 0, 2);
+  const contrast = clampRange(color.contrast ?? 1, 0, 3);
+  const saturation = clampRange(color.saturation ?? 1, 0, 3);
+  const hue = clampRange(color.hue ?? 0, -180, 180);
+  const vignette = clampRange(color.vignette ?? 0, -1, 1);
 
   const filters: string[] = [];
 
@@ -1666,6 +2036,31 @@ function buildAudioPanExpression(
   }
 
   return `pan=stereo|c0=${left}*c0|c1=${right}*c1`;
+}
+
+function buildAtempoChain(rawFactor: number): string {
+  if (!Number.isFinite(rawFactor) || rawFactor <= 0) return '';
+  let factor = rawFactor;
+  const filters: string[] = [];
+
+  while (factor > 2) {
+    filters.push('atempo=2');
+    factor /= 2;
+  }
+  while (factor < 0.5) {
+    filters.push('atempo=0.5');
+    factor /= 0.5;
+  }
+
+  if (Math.abs(factor - 1) > 0.0005 || filters.length === 0) {
+    filters.push(`atempo=${factor.toFixed(6)}`);
+  }
+
+  if (filters.length === 1 && filters[0] === 'atempo=1.000000') {
+    return '';
+  }
+
+  return filters.join(',');
 }
 
 function resolveStoredClipVolume(clip: StoredClipData): number {
@@ -1766,6 +2161,8 @@ export const __test__ = {
   adaptStoredSequenceToCore,
   extractSegments,
   buildFFmpegArgs,
+  prepareFfmpegArgsForSpawn,
+  parseFfmpegProgressTime,
   buildStoredExportMeta,
   sanitizeFilename,
   resolveOutputDir,
