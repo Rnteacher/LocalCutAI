@@ -1,0 +1,21 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - heading "LOCALCUT" [level=1] [ref=e5]
+    - generic [ref=e6]: v0.1.0
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]:
+        - heading "Projects" [level=2] [ref=e10]
+        - paragraph [ref=e11]: Create, browse and continue edit sessions
+      - button "+ New Project" [ref=e12]
+    - generic [ref=e15]:
+      - button "test 3/13/2026, 12:12:55 PM" [ref=e16]:
+        - generic [ref=e17]: test
+        - generic [ref=e18]: 3/13/2026, 12:12:55 PM
+      - button "Delete" [ref=e20]
+  - contentinfo [ref=e21]:
+    - generic [ref=e22]:
+      - generic [ref=e23]: Ready
+      - generic [ref=e24]: "Tool: Select"
+      - generic [ref=e25]: Linked
+    - generic [ref=e27]: "Space: play • J/K/L: shuttle • ←/→: 1f • ↑/↓: cuts • Home/End • C/V • M/[ ]"

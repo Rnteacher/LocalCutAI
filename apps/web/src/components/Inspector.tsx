@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { useSelectionStore } from '../stores/selectionStore.js';
 import { useProjectStore, computeTransitionSideLimit } from '../stores/projectStore.js';
 import { applySegmentKeyframeEasing } from '../lib/keyframeEasing.js';
+import { evaluateClipNumericKeyframe } from '../lib/clipKeyframes.js';
 import type {
   TimelineClipData,
   TimelineTrackData,
@@ -1421,9 +1422,80 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const hasClipSelection = selectedClipIds.size > 0;
   const seqResolution = sequences[0]?.resolution ?? { width: 1920, height: 1080 };
 
-  const scaleX = selectedClip?.scaleX ?? 1;
-  const scaleY = selectedClip?.scaleY ?? 1;
-  const speed = selectedClip?.speed ?? 1;
+  const evaluatePropertyAtCurrentFrame = useCallback(
+    (clip: TimelineClipData | null, property: KeyframeProperty, defaultValue: number): number => {
+      if (!clip) return defaultValue;
+      const clipLocalFrame = Math.max(
+        0,
+        Math.min(clip.durationFrames, currentFrame - clip.startFrame),
+      );
+      return evaluateClipNumericKeyframe(clip, property, clipLocalFrame, defaultValue);
+    },
+    [currentFrame],
+  );
+
+  const positionX = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'transform.positionX',
+    selectedClip?.positionX ?? 0,
+  );
+  const positionY = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'transform.positionY',
+    selectedClip?.positionY ?? 0,
+  );
+  const scaleX = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'transform.scaleX',
+    selectedClip?.scaleX ?? 1,
+  );
+  const scaleY = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'transform.scaleY',
+    selectedClip?.scaleY ?? 1,
+  );
+  const rotation = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'transform.rotation',
+    selectedClip?.rotation ?? 0,
+  );
+  const opacity = evaluatePropertyAtCurrentFrame(selectedClip, 'opacity', selectedClip?.opacity ?? 1);
+  const speed = evaluatePropertyAtCurrentFrame(selectedClip, 'speed', selectedClip?.speed ?? 1);
+  const brightness = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'brightness',
+    selectedClip?.brightness ?? 1,
+  );
+  const contrast = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'contrast',
+    selectedClip?.contrast ?? 1,
+  );
+  const saturation = evaluatePropertyAtCurrentFrame(
+    selectedClip,
+    'saturation',
+    selectedClip?.saturation ?? 1,
+  );
+  const hue = evaluatePropertyAtCurrentFrame(selectedClip, 'hue', selectedClip?.hue ?? 0);
+  const vignette = evaluatePropertyAtCurrentFrame(selectedClip, 'vignette', selectedClip?.vignette ?? 0);
+  const audioVolumeGain = evaluatePropertyAtCurrentFrame(
+    audioControlClip,
+    'volume',
+    audioControlClip
+      ? Math.max(
+          0,
+          dbToGain(
+            audioControlClip.audioGainDb ??
+              gainToDb(audioControlClip.gain ?? audioControlClip.audioVolume ?? 1),
+          ),
+        )
+      : 1,
+  );
+  const audioPan = evaluatePropertyAtCurrentFrame(
+    audioControlClip,
+    'pan',
+    audioControlClip?.pan ?? audioControlClip?.audioPan ?? 0,
+  );
   const speedMagnitude = Math.max(0.1, Math.min(4, Math.abs(speed)));
 
   const baseWidth = clipAsset?.resolution?.width ?? seqResolution.width;
@@ -1524,7 +1596,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       const scaleYClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleY').length > 0;
       const keepLinkedKeyframes = linkScale && (scaleXClocked || scaleYClocked);
       if (linkScale) {
-        const sySign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
+        const sySign = scaleY < 0 ? -1 : 1;
         const nextY = clampScale(Math.abs(next) * sySign);
         void updateClipProperties(selectedClip.id, {
           scaleX: next,
@@ -1537,7 +1609,14 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
         upsertPropertyKeyframeValue(selectedClip, 'transform.scaleX', next, scaleXClocked);
       }
     },
-    [selectedClip, linkScale, updateClipProperties, getClipPropertyKeyframes, upsertPropertyKeyframeValue],
+    [
+      selectedClip,
+      linkScale,
+      scaleY,
+      updateClipProperties,
+      getClipPropertyKeyframes,
+      upsertPropertyKeyframeValue,
+    ],
   );
 
   const updateScaleY = useCallback(
@@ -1548,7 +1627,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       const scaleYClocked = getClipPropertyKeyframes(selectedClip, 'transform.scaleY').length > 0;
       const keepLinkedKeyframes = linkScale && (scaleXClocked || scaleYClocked);
       if (linkScale) {
-        const sxSign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
+        const sxSign = scaleX < 0 ? -1 : 1;
         const nextX = clampScale(Math.abs(next) * sxSign);
         void updateClipProperties(selectedClip.id, {
           scaleX: nextX,
@@ -1561,7 +1640,14 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
         upsertPropertyKeyframeValue(selectedClip, 'transform.scaleY', next, scaleYClocked);
       }
     },
-    [selectedClip, linkScale, updateClipProperties, getClipPropertyKeyframes, upsertPropertyKeyframeValue],
+    [
+      selectedClip,
+      linkScale,
+      scaleX,
+      updateClipProperties,
+      getClipPropertyKeyframes,
+      upsertPropertyKeyframeValue,
+    ],
   );
 
   const fitToFrame = useCallback(() => {
@@ -1570,8 +1656,8 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     const srcH = clipAsset.resolution?.height ?? seqResolution.height;
     const fitX = seqResolution.width / Math.max(1, srcW);
     const fitY = seqResolution.height / Math.max(1, srcH);
-    const sxSign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
-    const sySign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
+    const sxSign = scaleX < 0 ? -1 : 1;
+    const sySign = scaleY < 0 ? -1 : 1;
     const nextScaleX = clampScale(fitX * sxSign);
     const nextScaleY = clampScale(fitY * sySign);
     void updateClipProperties(selectedClip.id, {
@@ -1593,6 +1679,8 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
     clipAsset,
     seqResolution.width,
     seqResolution.height,
+    scaleX,
+    scaleY,
     updateClipProperties,
     getClipPropertyKeyframes,
     upsertPropertyKeyframeValue,
@@ -1601,21 +1689,21 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
   const updateWidth = useCallback(
     (w: number) => {
       if (!selectedClip) return;
-      const sign = (selectedClip.scaleX ?? 1) < 0 ? -1 : 1;
+      const sign = scaleX < 0 ? -1 : 1;
       const next = clampScale((Math.max(1, w) / Math.max(1, baseWidth)) * sign);
       updateScaleX(next);
     },
-    [selectedClip, baseWidth, updateScaleX],
+    [selectedClip, baseWidth, scaleX, updateScaleX],
   );
 
   const updateHeight = useCallback(
     (h: number) => {
       if (!selectedClip) return;
-      const sign = (selectedClip.scaleY ?? 1) < 0 ? -1 : 1;
+      const sign = scaleY < 0 ? -1 : 1;
       const next = clampScale((Math.max(1, h) / Math.max(1, baseHeight)) * sign);
       updateScaleY(next);
     },
-    [selectedClip, baseHeight, updateScaleY],
+    [selectedClip, baseHeight, scaleY, updateScaleY],
   );
 
   const clipLocalFrame = selectedClip
@@ -1688,51 +1776,64 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
       if (!clip) return 0;
       switch (property) {
         case 'speed':
-          return clip.speed ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.speed ?? 1);
         case 'volume': {
           const db = clip.audioGainDb ?? gainToDb(clip.gain ?? clip.audioVolume ?? 1);
-          return Math.max(0, dbToGain(db));
+          return evaluatePropertyAtCurrentFrame(clip, property, Math.max(0, dbToGain(db)));
         }
         case 'pan':
-          return clip.pan ?? clip.audioPan ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.pan ?? clip.audioPan ?? 0);
         case 'brightness':
-          return clip.brightness ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.brightness ?? 1);
         case 'contrast':
-          return clip.contrast ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.contrast ?? 1);
         case 'saturation':
-          return clip.saturation ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.saturation ?? 1);
         case 'hue':
-          return clip.hue ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.hue ?? 0);
         case 'vignette':
-          return clip.vignette ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.vignette ?? 0);
         case 'transform.positionX':
-          return clip.positionX ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.positionX ?? 0);
         case 'transform.positionY':
-          return clip.positionY ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.positionY ?? 0);
         case 'transform.scaleX':
-          return clip.scaleX ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.scaleX ?? 1);
         case 'transform.scaleY':
-          return clip.scaleY ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.scaleY ?? 1);
         case 'transform.rotation':
-          return clip.rotation ?? 0;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.rotation ?? 0);
         case 'transform.anchorX':
         case 'transform.anchorY':
           return 0.5;
         case 'opacity':
-          return clip.opacity ?? 1;
+          return evaluatePropertyAtCurrentFrame(clip, property, clip.opacity ?? 1);
         case 'mask.opacity':
-          return (clip.id === selectedClip?.id ? selectedMask?.opacity : clip.masks?.[0]?.opacity) ?? 1;
+          return evaluatePropertyAtCurrentFrame(
+            clip,
+            property,
+            (clip.id === selectedClip?.id ? selectedMask?.opacity : clip.masks?.[0]?.opacity) ?? 1,
+          );
         case 'mask.feather':
-          return (clip.id === selectedClip?.id ? selectedMask?.feather : clip.masks?.[0]?.feather) ?? 0;
+          return evaluatePropertyAtCurrentFrame(
+            clip,
+            property,
+            (clip.id === selectedClip?.id ? selectedMask?.feather : clip.masks?.[0]?.feather) ?? 0,
+          );
         case 'mask.expansion':
-          return (clip.id === selectedClip?.id
-            ? selectedMask?.expansion
-            : clip.masks?.[0]?.expansion) ?? 0;
+          return evaluatePropertyAtCurrentFrame(
+            clip,
+            property,
+            (clip.id === selectedClip?.id
+              ? selectedMask?.expansion
+              : clip.masks?.[0]?.expansion) ?? 0,
+          );
         default:
           return 0;
       }
     },
     [
+      evaluatePropertyAtCurrentFrame,
       selectedClip?.id,
       selectedMask?.opacity,
       selectedMask?.feather,
@@ -2090,22 +2191,14 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 </button>
                 <button
                   className="rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600"
-                  onClick={() =>
-                    void updateClipProperties(selectedClip.id, {
-                      scaleX: clampScale(-(selectedClip.scaleX ?? 1)),
-                    })
-                  }
+                  onClick={() => updateScaleX(clampScale(-scaleX))}
                   title="Flip horizontal"
                 >
                   ⇋
                 </button>
                 <button
                   className="rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600"
-                  onClick={() =>
-                    void updateClipProperties(selectedClip.id, {
-                      scaleY: clampScale(-(selectedClip.scaleY ?? 1)),
-                    })
-                  }
+                  onClick={() => updateScaleY(clampScale(-scaleY))}
                   title="Flip vertical"
                 >
                   ⇵
@@ -2135,7 +2228,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
 
               <SliderNumberField
                 label="Position X"
-                value={selectedClip.positionX ?? 0}
+                value={positionX}
                 min={-3000}
                 max={3000}
                 step={1}
@@ -2145,7 +2238,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Position Y"
-                value={selectedClip.positionY ?? 0}
+                value={positionY}
                 min={-3000}
                 max={3000}
                 step={1}
@@ -2185,7 +2278,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Rotation"
-                value={selectedClip.rotation ?? 0}
+                value={rotation}
                 min={-180}
                 max={180}
                 step={1}
@@ -2195,7 +2288,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Opacity"
-                value={(selectedClip.opacity ?? 1) * 100}
+                value={opacity * 100}
                 min={0}
                 max={100}
                 step={1}
@@ -2222,7 +2315,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                 </button>
                 <button
                   className="rounded bg-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-600"
-                  onClick={() => updateProp('speed', -(selectedClip.speed ?? 1))}
+                  onClick={() => updateProp('speed', -speed)}
                   title="Reverse clip direction"
                 >
                   Reverse
@@ -2284,7 +2377,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               </div>
               <SliderNumberField
                 label="Brightness"
-                value={(selectedClip.brightness ?? 1) * 100}
+                value={brightness * 100}
                 min={0}
                 max={200}
                 step={1}
@@ -2294,7 +2387,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Contrast"
-                value={(selectedClip.contrast ?? 1) * 100}
+                value={contrast * 100}
                 min={0}
                 max={200}
                 step={1}
@@ -2304,7 +2397,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Saturation"
-                value={(selectedClip.saturation ?? 1) * 100}
+                value={saturation * 100}
                 min={0}
                 max={200}
                 step={1}
@@ -2314,7 +2407,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Hue"
-                value={selectedClip.hue ?? 0}
+                value={hue}
                 min={-180}
                 max={180}
                 step={1}
@@ -2324,7 +2417,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Vignette"
-                value={(selectedClip.vignette ?? 0) * 100}
+                value={vignette * 100}
                 min={-100}
                 max={100}
                 step={1}
@@ -2569,7 +2662,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
 
                     <SliderNumberField
                       label="Mask Opacity"
-                      value={(selectedMask.opacity ?? 1) * 100}
+                      value={getPropertyValueAtCurrent(selectedClip, 'mask.opacity') * 100}
                       min={0}
                       max={100}
                       step={1}
@@ -2591,7 +2684,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                     />
                     <SliderNumberField
                       label="Feather"
-                      value={selectedMask.feather ?? 0}
+                      value={getPropertyValueAtCurrent(selectedClip, 'mask.feather')}
                       min={0}
                       max={300}
                       step={1}
@@ -2613,7 +2706,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
                     />
                     <SliderNumberField
                       label="Expansion"
-                      value={selectedMask.expansion ?? 0}
+                      value={getPropertyValueAtCurrent(selectedClip, 'mask.expansion')}
                       min={-200}
                       max={200}
                       step={1}
@@ -2714,10 +2807,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               </div>
               <SliderNumberField
                 label="Volume"
-                value={
-                  audioControlClip.audioGainDb ??
-                  gainToDb(audioControlClip.gain ?? audioControlClip.audioVolume ?? 1)
-                }
+                value={gainToDb(audioVolumeGain)}
                 min={-60}
                 max={12}
                 step={0.5}
@@ -2742,7 +2832,7 @@ export function Inspector({ onToggleCollapse }: { onToggleCollapse?: () => void 
               />
               <SliderNumberField
                 label="Pan"
-                value={(audioControlClip.pan ?? audioControlClip.audioPan ?? 0) * 100}
+                value={audioPan * 100}
                 min={-100}
                 max={100}
                 step={1}

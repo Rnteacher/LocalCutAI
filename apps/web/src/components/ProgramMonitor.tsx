@@ -798,6 +798,7 @@ export function ProgramMonitor() {
   const targetVideoTrackId = useSelectionStore((s) => s.targetVideoTrackId);
   const targetAudioTrackId = useSelectionStore((s) => s.targetAudioTrackId);
   const linkedSelection = useSelectionStore((s) => s.linkedSelection);
+  const linkedScale = useSelectionStore((s) => s.linkedScale);
   const autoKeyframeEnabled = useSelectionStore((s) => s.autoKeyframeEnabled);
   const setAutoKeyframeEnabled = useSelectionStore((s) => s.setAutoKeyframeEnabled);
   const selectClip = useSelectionStore((s) => s.selectClip);
@@ -1960,51 +1961,62 @@ export function ProgramMonitor() {
           scaleY: preview.scaleY,
         });
 
-        if (autoKeyframeEnabled) {
-          const clip = activeLayers.find((layer) => layer.clip.id === drag.clipId)?.clip ?? null;
-          const localFrame = Math.max(0, Math.round(drag.clipLocalFrame));
-          const existing = clip?.keyframes ?? [];
-          const getExistingId = (property: TimelineKeyframeData['property']): string | null =>
-            existing.find((kf) => kf.property === property && kf.frame === localFrame)?.id ?? null;
-          const makeId = (property: TimelineKeyframeData['property']): string =>
-            getExistingId(property) ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+        const clip = activeLayers.find((layer) => layer.clip.id === drag.clipId)?.clip ?? null;
+        const localFrame = Math.max(0, Math.round(drag.clipLocalFrame));
+        const existing = clip?.keyframes ?? [];
+        const hasClockedKeyframes = (property: TimelineKeyframeData['property']): boolean =>
+          existing.some((kf) => kf.property === property);
+        const keepLinkedScaleKeyframes =
+          linkedScale &&
+          (hasClockedKeyframes('transform.scaleX') || hasClockedKeyframes('transform.scaleY'));
+        const getExistingKeyframe = (
+          property: TimelineKeyframeData['property'],
+        ): TimelineKeyframeData | null =>
+          existing.find((kf) => kf.property === property && kf.frame === localFrame) ?? null;
 
-          const maybeUpsert = (
-            property: TimelineKeyframeData['property'],
-            value: number,
-            previous: number,
-          ): void => {
-            if (Math.abs(value - previous) < 0.0001) return;
-            void upsertClipKeyframe(drag.clipId, {
-              id: makeId(property),
-              property,
-              frame: localFrame,
-              value,
-              easing: 'linear',
-            });
-          };
+        const maybeUpsert = (
+          property: TimelineKeyframeData['property'],
+          value: number,
+          previous: number,
+          force = false,
+        ): void => {
+          if (!autoKeyframeEnabled && !force) return;
+          if (Math.abs(value - previous) < 0.0001) return;
+          const existingKeyframe = getExistingKeyframe(property);
+          void upsertClipKeyframe(drag.clipId, {
+            id: existingKeyframe?.id ?? crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+            property,
+            frame: localFrame,
+            value,
+            easing: existingKeyframe?.easing ?? 'linear',
+            bezierHandles: existingKeyframe?.bezierHandles,
+          });
+        };
 
-          maybeUpsert(
-            'transform.positionX',
-            preview.positionX,
-            drag.posX,
-          );
-          maybeUpsert(
-            'transform.positionY',
-            preview.positionY,
-            drag.posY,
-          );
-          maybeUpsert(
-            'transform.scaleX',
-            preview.scaleX,
-            drag.scaleX,
-          );
-          maybeUpsert(
-            'transform.scaleY',
-            preview.scaleY,
-            drag.scaleY,
-          );
-        }
+        maybeUpsert(
+          'transform.positionX',
+          preview.positionX,
+          drag.posX,
+          hasClockedKeyframes('transform.positionX'),
+        );
+        maybeUpsert(
+          'transform.positionY',
+          preview.positionY,
+          drag.posY,
+          hasClockedKeyframes('transform.positionY'),
+        );
+        maybeUpsert(
+          'transform.scaleX',
+          preview.scaleX,
+          drag.scaleX,
+          keepLinkedScaleKeyframes || hasClockedKeyframes('transform.scaleX'),
+        );
+        maybeUpsert(
+          'transform.scaleY',
+          preview.scaleY,
+          drag.scaleY,
+          keepLinkedScaleKeyframes || hasClockedKeyframes('transform.scaleY'),
+        );
       }
       dragRef.current = null;
       transformPreviewRef.current = null;
@@ -2020,6 +2032,7 @@ export function ProgramMonitor() {
   }, [
     activeLayers,
     autoKeyframeEnabled,
+    linkedScale,
     upsertClipKeyframe,
     upsertMaskShapeKeyframe,
     updateClipProperties,
@@ -2525,10 +2538,10 @@ export function ProgramMonitor() {
         clipLocalFrame: target.layer.clipLocalFrame,
         startX: e.clientX,
         startY: e.clientY,
-        posX: target.layer.clip.positionX ?? 0,
-        posY: target.layer.clip.positionY ?? 0,
-        scaleX: target.layer.clip.scaleX ?? 1,
-        scaleY: target.layer.clip.scaleY ?? 1,
+        posX: target.layer.positionX ?? 0,
+        posY: target.layer.positionY ?? 0,
+        scaleX: target.layer.scaleX ?? 1,
+        scaleY: target.layer.scaleY ?? 1,
       };
       e.preventDefault();
       e.stopPropagation();
