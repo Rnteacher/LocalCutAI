@@ -5,6 +5,17 @@ import type { ApiMediaAsset } from '../lib/api.js';
 import { api } from '../lib/api.js';
 import { ConfirmDialog } from './ConfirmDialog.js';
 
+function attachAssetDragPayload(
+  event: React.DragEvent<HTMLElement>,
+  asset: ApiMediaAsset,
+): void {
+  const payload = event.ctrlKey && asset.type === 'video' ? { ...asset, audioOnly: true } : asset;
+  const serialized = JSON.stringify(payload);
+  event.dataTransfer.setData('application/x-localcut-asset', serialized);
+  event.dataTransfer.setData('text/plain', `localcut-asset:${serialized}`);
+  event.dataTransfer.effectAllowed = 'copy';
+}
+
 function MediaIcon({ type }: { type: string }) {
   switch (type) {
     case 'video':
@@ -56,10 +67,7 @@ function MediaItem({
         onClick={() => onSelect(asset)}
         draggable
         onDragStart={(e) => {
-          const payload =
-            e.ctrlKey && asset.type === 'video' ? { ...asset, audioOnly: true } : asset;
-          e.dataTransfer.setData('application/x-localcut-asset', JSON.stringify(payload));
-          e.dataTransfer.effectAllowed = 'copy';
+          attachAssetDragPayload(e, asset);
         }}
       >
         <div className="relative h-20 w-full overflow-hidden bg-zinc-900">
@@ -69,6 +77,7 @@ function MediaItem({
               alt={asset.name}
               className="h-full w-full object-cover"
               loading="lazy"
+              draggable={false}
             />
           )}
           {asset.type === 'video' && (
@@ -77,6 +86,7 @@ function MediaItem({
               className="h-full w-full object-cover"
               muted
               preload="metadata"
+              draggable={false}
             />
           )}
           {asset.type === 'audio' && (
@@ -109,9 +119,7 @@ function MediaItem({
       onClick={() => onSelect(asset)}
       draggable
       onDragStart={(e) => {
-        const payload = e.ctrlKey && asset.type === 'video' ? { ...asset, audioOnly: true } : asset;
-        e.dataTransfer.setData('application/x-localcut-asset', JSON.stringify(payload));
-        e.dataTransfer.effectAllowed = 'copy';
+        attachAssetDragPayload(e, asset);
       }}
     >
       <div className="h-9 w-12 overflow-hidden rounded border border-zinc-700 bg-zinc-900">
@@ -121,6 +129,7 @@ function MediaItem({
             alt={asset.name}
             className="h-full w-full object-cover"
             loading="lazy"
+            draggable={false}
           />
         )}
         {asset.type === 'video' && (
@@ -129,6 +138,7 @@ function MediaItem({
             className="h-full w-full object-cover"
             muted
             preload="metadata"
+            draggable={false}
           />
         )}
         {asset.type === 'audio' && (

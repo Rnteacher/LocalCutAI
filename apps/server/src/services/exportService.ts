@@ -195,6 +195,7 @@ interface MediaDimensions {
 interface ResolvedMediaInputs {
   pathById: Map<string, string>;
   dimensionsById: Map<string, MediaDimensions>;
+  typeById: Map<string, 'video' | 'audio' | 'image'>;
 }
 
 interface VideoSegment {
@@ -368,6 +369,7 @@ async function runExport(
     totalDurationSec,
     storedMeta,
     mediaInputs.dimensionsById,
+    mediaInputs.typeById,
   );
   const preparedFfmpegArgs = prepareFfmpegArgsForSpawn(jobId, ffmpegArgs);
 
@@ -523,6 +525,7 @@ function buildFFmpegArgs(
   totalDurationSec: number,
   storedMeta?: StoredExportMeta,
   mediaDimensionsById?: Map<string, MediaDimensions>,
+  mediaTypesById?: Map<string, 'video' | 'audio' | 'image'>,
 ): string[] {
   const width = params.width || sequence.resolution.width;
   const height = params.height || sequence.resolution.height;
@@ -535,7 +538,7 @@ function buildFFmpegArgs(
       clipById.set(clip.id, clip);
     }
   }
-  const inputFiles: string[] = [];
+  const inputFiles: Array<{ path: string; type: 'video' | 'audio' | 'image' }> = [];
   const inputMap = new Map<string, number>();
 
   const registerInput = (mediaAssetId: string): number | null => {
@@ -544,8 +547,9 @@ function buildFFmpegArgs(
     if (inputMap.has(mediaAssetId)) {
       return inputMap.get(mediaAssetId)!;
     }
+    const type = mediaTypesById?.get(mediaAssetId) ?? 'video';
     const idx = inputFiles.length;
-    inputFiles.push(filePath);
+    inputFiles.push({ path: filePath, type });
     inputMap.set(mediaAssetId, idx);
     return idx;
   };
@@ -588,7 +592,11 @@ function buildFFmpegArgs(
 
   const args: string[] = ['-y', '-progress', 'pipe:2', '-nostats'];
   for (const file of inputFiles) {
-    args.push('-i', file);
+    if (file.type === 'image') {
+      args.push('-loop', '1', '-framerate', fps.toString(), '-i', file.path);
+      continue;
+    }
+    args.push('-i', file.path);
   }
 
   const filterParts: string[] = [];
@@ -2180,10 +2188,12 @@ async function resolveMediaInputs(sequence: Sequence): Promise<ResolvedMediaInpu
 
   const pathById = new Map<string, string>();
   const dimensionsById = new Map<string, MediaDimensions>();
+  const typeById = new Map<string, 'video' | 'audio' | 'image'>();
   for (const assetId of assetIds) {
     const row = db.select().from(mediaAssets).where(eq(mediaAssets.id, assetId)).get();
     if (row && fs.existsSync(row.filePath)) {
       pathById.set(assetId, row.filePath);
+      typeById.set(assetId, row.type);
       if (typeof row.width === 'number' && row.width > 0 && typeof row.height === 'number' && row.height > 0) {
         dimensionsById.set(assetId, {
           width: row.width,
@@ -2193,7 +2203,7 @@ async function resolveMediaInputs(sequence: Sequence): Promise<ResolvedMediaInpu
     }
   }
 
-  return { pathById, dimensionsById };
+  return { pathById, dimensionsById, typeById };
 }
 
 function sanitizeFilename(filename: string | undefined, fallback: string): string {

@@ -84,6 +84,40 @@ interface RendererStatus {
   reason: string | null;
 }
 
+type VisualMediaElement = HTMLVideoElement | HTMLImageElement;
+
+function isImageClip(clip: TimelineClipData): boolean {
+  return clip.type === 'image';
+}
+
+function getVisualSourceDimensions(
+  source: VisualMediaElement | null,
+  fallbackWidth: number,
+  fallbackHeight: number,
+): { width: number; height: number } {
+  if (source instanceof HTMLVideoElement) {
+    return {
+      width: source.videoWidth || fallbackWidth,
+      height: source.videoHeight || fallbackHeight,
+    };
+  }
+  if (source instanceof HTMLImageElement) {
+    return {
+      width: source.naturalWidth || fallbackWidth,
+      height: source.naturalHeight || fallbackHeight,
+    };
+  }
+  return { width: fallbackWidth, height: fallbackHeight };
+}
+
+function isVisualSourceReady(source: VisualMediaElement | null): boolean {
+  if (!source) return false;
+  if (source instanceof HTMLVideoElement) {
+    return source.readyState >= 2 && source.videoWidth > 0 && source.videoHeight > 0;
+  }
+  return source.complete && source.naturalWidth > 0 && source.naturalHeight > 0;
+}
+
 const MASK_OUTLINE_COLORS = [
   '#22d3ee',
   '#f59e0b',
@@ -642,6 +676,7 @@ export function ProgramMonitor() {
   const viewfinderRef = useRef<HTMLDivElement>(null);
   const warnedClipIdsRef = useRef(new Set<string>());
   const videoByClipIdRef = useRef(new Map<string, HTMLVideoElement>());
+  const imageByClipIdRef = useRef(new Map<string, HTMLImageElement>());
   const seekStateRef = useRef(
     new Map<string, { seeking: boolean; desired: number; lastSeekAt: number }>(),
   );
@@ -956,6 +991,37 @@ export function ProgramMonitor() {
     return video;
   }, []);
 
+  const getOrCreateImage = useCallback((clip: TimelineClipData): HTMLImageElement | null => {
+    if (!clip.mediaAssetId) return null;
+    const cache = imageByClipIdRef.current;
+    let image = cache.get(clip.id);
+    if (!image) {
+      image = new Image();
+      image.src = api.media.fileUrl(clip.mediaAssetId);
+      image.crossOrigin = 'anonymous';
+      image.decoding = 'async';
+      image.onload = () => setRenderTick((v) => v + 1);
+      image.onerror = () => {
+        if (!warnedClipIdsRef.current.has(clip.id)) {
+          warnedClipIdsRef.current.add(clip.id);
+          console.warn(
+            '[ProgramMonitor] Failed loading image for clip',
+            clip.id,
+            clip.mediaAssetId,
+          );
+        }
+      };
+      cache.set(clip.id, image);
+    }
+    return image;
+  }, []);
+
+  const getVisualSource = useCallback(
+    (clip: TimelineClipData): VisualMediaElement | null =>
+      isImageClip(clip) ? getOrCreateImage(clip) : getOrCreateVideo(clip),
+    [getOrCreateImage, getOrCreateVideo],
+  );
+
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
@@ -991,8 +1057,8 @@ export function ProgramMonitor() {
     (layer: ActiveLayer): Rect | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      const video = layer.clip.mediaAssetId ? getOrCreateVideo(layer.clip) : null;
-      if (layer.clip.mediaAssetId && (!video || video.readyState < 1)) return null;
+      const source = layer.clip.mediaAssetId ? getVisualSource(layer.clip) : null;
+      if (layer.clip.mediaAssetId && !isVisualSourceReady(source)) return null;
 
       const frame = frameFitRect(
         canvas.width,
@@ -1000,8 +1066,11 @@ export function ProgramMonitor() {
         seqResolution.width,
         seqResolution.height,
       );
-      const vw = video?.videoWidth || seqResolution.width;
-      const vh = video?.videoHeight || seqResolution.height;
+      const { width: vw, height: vh } = getVisualSourceDimensions(
+        source,
+        seqResolution.width,
+        seqResolution.height,
+      );
       const tr =
         transformPreviewRef.current?.clipId === layer.clip.id ? transformPreviewRef.current : null;
 
@@ -1026,7 +1095,7 @@ export function ProgramMonitor() {
         height,
       };
     },
-    [getOrCreateVideo, zoom, pan, seqResolution.width, seqResolution.height],
+    [getVisualSource, zoom, pan, seqResolution.width, seqResolution.height],
   );
 
   const getLayerGeometry = useCallback(
@@ -1039,9 +1108,12 @@ export function ProgramMonitor() {
         seqResolution.width,
         seqResolution.height,
       );
-      const video = layer.clip.mediaAssetId ? getOrCreateVideo(layer.clip) : null;
-      const sourceWidth = video?.videoWidth || seqResolution.width;
-      const sourceHeight = video?.videoHeight || seqResolution.height;
+      const source = layer.clip.mediaAssetId ? getVisualSource(layer.clip) : null;
+      const { width: sourceWidth, height: sourceHeight } = getVisualSourceDimensions(
+        source,
+        seqResolution.width,
+        seqResolution.height,
+      );
       const drawWidth = sourceWidth * frame.scale;
       const drawHeight = sourceHeight * frame.scale;
       const drawX = canvas.width / 2 - drawWidth / 2;
@@ -1081,7 +1153,7 @@ export function ProgramMonitor() {
       };
     },
     [
-      getOrCreateVideo,
+      getVisualSource,
       pan.x,
       pan.y,
       zoom,
@@ -1163,9 +1235,11 @@ export function ProgramMonitor() {
       const generatorColor = resolveGeneratorColor(layer.clip);
       const isAdjustmentLayer = layer.clip.generator?.kind === 'adjustment-layer';
       const needsMedia = !generatorColor && !isAdjustmentLayer;
-      const video = needsMedia ? getOrCreateVideo(layer.clip) : null;
+      const source = needsMedia ? getVisualSource(layer.clip) : null;
+      const video = source instanceof HTMLVideoElement ? source : null;
+      const image = source instanceof HTMLImageElement ? source : null;
 
-      if (needsMedia && !video) continue;
+      if (needsMedia && !source) continue;
 
       if (video) {
         const st = seekStateRef.current.get(layer.clip.id) ?? {
@@ -1212,8 +1286,9 @@ export function ProgramMonitor() {
           }
         }
 
-        if (video.readyState < 2) continue;
+        if (!isVisualSourceReady(video)) continue;
       }
+      if (image && !isVisualSourceReady(image)) continue;
 
       if (!useWebgl && !drewAny) {
         ctx.fillStyle = '#000';
@@ -1226,8 +1301,11 @@ export function ProgramMonitor() {
         seqResolution.width,
         seqResolution.height,
       );
-      const vw = video?.videoWidth || seqResolution.width;
-      const vh = video?.videoHeight || seqResolution.height;
+      const { width: vw, height: vh } = getVisualSourceDimensions(
+        source,
+        seqResolution.width,
+        seqResolution.height,
+      );
       const drawWidth = vw * frame.scale;
       const drawHeight = vh * frame.scale;
 
@@ -1301,8 +1379,8 @@ export function ProgramMonitor() {
       } else if (generatorColor) {
         layerCtx.fillStyle = generatorColor;
         layerCtx.fillRect(dx, dy, drawWidth, drawHeight);
-      } else if (video) {
-        layerCtx.drawImage(video, dx, dy, drawWidth, drawHeight);
+      } else if (source) {
+        layerCtx.drawImage(source, dx, dy, drawWidth, drawHeight);
       }
 
       if (Math.abs(vignette) > 0.001) {
@@ -1712,7 +1790,7 @@ export function ProgramMonitor() {
     rendererMode,
     isPlaying,
     shuttleSpeed,
-    getOrCreateVideo,
+    getVisualSource,
     getLayerGeometry,
     zoom,
     pan,
@@ -1956,6 +2034,10 @@ export function ProgramMonitor() {
         video.load();
       }
       videoByClipIdRef.current.clear();
+      for (const image of imageByClipIdRef.current.values()) {
+        image.removeAttribute('src');
+      }
+      imageByClipIdRef.current.clear();
       seekStateRef.current.clear();
     };
   }, []);

@@ -599,6 +599,70 @@ describe('ExportService core-plan integration', () => {
     expect(filterArg).toContain('scale=iw*1.100000:ih*0.800000');
   });
 
+  it('builds ffmpeg args for still image clips using looped image inputs', async () => {
+    const mod = await import('./exportService.js');
+    const seqRow = {
+      id: 'seq-image',
+      projectId: 'proj1',
+      name: 'Image Sequence',
+      frameRateNum: 24,
+      frameRateDen: 1,
+      width: 1920,
+      height: 1080,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    } as any;
+
+    const seqData = {
+      tracks: [
+        {
+          id: 'v1',
+          type: 'video',
+          visible: true,
+          muted: false,
+          clips: [
+            {
+              id: 'img1',
+              mediaAssetId: 'img-asset',
+              type: 'image',
+              startFrame: 0,
+              durationFrames: 48,
+              sourceInFrame: 0,
+              opacity: 1,
+            },
+          ],
+        },
+      ],
+    };
+
+    const sequence = mod.__test__.adaptStoredSequenceToCore(seqRow, seqData as any);
+    const args = mod.__test__.buildFFmpegArgs(
+      sequence,
+      {
+        sequenceId: sequence.id,
+        format: 'mp4',
+        videoCodec: 'libx264',
+        audioCodec: 'aac',
+        preset: 'medium',
+      },
+      'out.mp4',
+      new Map([['img-asset', 'overlay.png']]),
+      2,
+      undefined,
+      new Map([['img-asset', { width: 800, height: 600 }]]),
+      new Map([['img-asset', 'image']]),
+    );
+
+    expect(args.slice(0, 10)).toEqual(
+      expect.arrayContaining(['-loop', '1', '-framerate', '24', '-i', 'overlay.png']),
+    );
+
+    const filterArg = args[args.indexOf('-filter_complex') + 1];
+    expect(filterArg).toContain('[0:v]trim=start=0:duration=2,setpts=PTS-STARTPTS');
+    expect(filterArg).toContain('format=rgba');
+    expect(filterArg).toContain("overlay=x='");
+  });
+
   it('builds ffmpeg args with clip color and mono channel routing', async () => {
     const mod = await import('./exportService.js');
     const seqRow = {

@@ -22,6 +22,33 @@ interface SourceDragPayload {
   audioOnly?: boolean;
 }
 
+function readPrefixedTransferData(
+  dataTransfer: DataTransfer,
+  mimeType: string,
+  prefix: string,
+): string {
+  const direct = dataTransfer.getData(mimeType);
+  if (direct) return direct;
+  const plain = dataTransfer.getData('text/plain');
+  if (plain.startsWith(prefix)) {
+    return plain.slice(prefix.length);
+  }
+  return '';
+}
+
+function attachSourceTransferData(
+  event: React.DragEvent<HTMLElement>,
+  assetPayload: ApiMediaAsset | (ApiMediaAsset & { audioOnly?: boolean }),
+  segmentPayload: SourceDragPayload,
+): void {
+  const assetSerialized = JSON.stringify(assetPayload);
+  const segmentSerialized = JSON.stringify(segmentPayload);
+  event.dataTransfer.setData('application/x-localcut-asset', assetSerialized);
+  event.dataTransfer.setData('application/x-localcut-source-segment', segmentSerialized);
+  event.dataTransfer.setData('text/plain', `localcut-source-segment:${segmentSerialized}`);
+  event.dataTransfer.effectAllowed = 'copy';
+}
+
 export function SourceMonitor() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const viewfinderRef = useRef<HTMLDivElement>(null);
@@ -454,7 +481,11 @@ export function SourceMonitor() {
         uploadMedia(e.dataTransfer.files);
         return;
       }
-      const assetData = e.dataTransfer.getData('application/x-localcut-asset');
+      const assetData = readPrefixedTransferData(
+        e.dataTransfer,
+        'application/x-localcut-asset',
+        'localcut-asset:',
+      );
       if (assetData) {
         try {
           setSourceAsset(JSON.parse(assetData) as ApiMediaAsset);
@@ -657,15 +688,7 @@ export function SourceMonitor() {
                     e.ctrlKey && sourceAsset.type === 'video'
                       ? { ...payload, audioOnly: true }
                       : payload;
-                  e.dataTransfer.setData(
-                    'application/x-localcut-asset',
-                    JSON.stringify(assetPayload),
-                  );
-                  e.dataTransfer.setData(
-                    'application/x-localcut-source-segment',
-                    JSON.stringify(segmentPayload),
-                  );
-                  e.dataTransfer.effectAllowed = 'copy';
+                  attachSourceTransferData(e, assetPayload, segmentPayload);
                   setDragPreview(e, payload);
                 }}
               />
@@ -693,15 +716,7 @@ export function SourceMonitor() {
                     e.ctrlKey && sourceAsset?.type === 'video'
                       ? { ...payload, audioOnly: true }
                       : payload;
-                  e.dataTransfer.setData(
-                    'application/x-localcut-asset',
-                    JSON.stringify(assetPayload),
-                  );
-                  e.dataTransfer.setData(
-                    'application/x-localcut-source-segment',
-                    JSON.stringify(segmentPayload),
-                  );
-                  e.dataTransfer.effectAllowed = 'copy';
+                  attachSourceTransferData(e, assetPayload, segmentPayload);
                   setDragPreview(e, payload);
                 }}
               />

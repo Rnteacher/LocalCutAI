@@ -144,6 +144,20 @@ interface TimelineClip {
   generator?: { kind: 'black-video' | 'color-matte' | 'adjustment-layer'; color?: string } | null;
 }
 
+function readPrefixedTransferData(
+  dataTransfer: DataTransfer,
+  mimeType: string,
+  prefix: string,
+): string {
+  const direct = dataTransfer.getData(mimeType);
+  if (direct) return direct;
+  const plain = dataTransfer.getData('text/plain');
+  if (plain.startsWith(prefix)) {
+    return plain.slice(prefix.length);
+  }
+  return '';
+}
+
 // Drag/Trim interaction state
 interface DragState {
   mode: 'move' | 'trim-left' | 'trim-right' | 'transition-in' | 'transition-out';
@@ -1896,7 +1910,11 @@ export function Timeline() {
         }
       }
 
-      const sourceSegment = e.dataTransfer.getData('application/x-localcut-source-segment');
+      const sourceSegment = readPrefixedTransferData(
+        e.dataTransfer,
+        'application/x-localcut-source-segment',
+        'localcut-source-segment:',
+      );
       if (sourceSegment) {
         try {
           const parsed = JSON.parse(sourceSegment) as {
@@ -1941,7 +1959,11 @@ export function Timeline() {
       }
 
       // Internal asset drag â€” create clip
-      const assetData = e.dataTransfer.getData('application/x-localcut-asset');
+      const assetData = readPrefixedTransferData(
+        e.dataTransfer,
+        'application/x-localcut-asset',
+        'localcut-asset:',
+      );
       if (assetData) {
         try {
           const payload = JSON.parse(assetData) as ApiMediaAsset & { audioOnly?: boolean };

@@ -322,6 +322,8 @@ async function openWindowsMediaPicker(): Promise<string[]> {
   }
 
   const script = `
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
 $dialog.Multiselect = $true
